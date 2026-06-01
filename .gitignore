@@ -1,0 +1,80 @@
+# Arduino compilation files
+*.hex
+*.elf
+*.bin
+*.eep
+*.lss
+*.map
+*.sym
+*.o
+*.a
+*.d
+
+# Build directories
+build/
+*.build/
+
+# Arduino IDE
+.DS_Store
+*.swp
+*.swo
+*~
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+lib/readme.txt
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# CLion
+.idea/
+cmake-build-*/
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Python (if you're using Python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+
+# Compiled libraries
+*.lib
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Linker output
+*.ilk
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Documentation
+docs/_build/
