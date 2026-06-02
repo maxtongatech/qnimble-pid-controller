@@ -1379,11 +1379,22 @@ void setDiff(qCommand& qC, Stream& S) {
   S.printf("Differential gain %i changed to %f us\n", channel, d);
 }
 
+//TODO: modify setpoint range for rails
+
 void setSetpt(qCommand& qC, Stream& S) {
-  // referenced as "set"
+  // referenced as "set <"
   setDebugWord(0xFFFF2004);
-  int channel = atoi(qC.next());
-  double s = atof(qC.next());
+  
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+
+  if(!arg1 || !arg2){
+    S.println("Syntax: set <channel> <voltage setpoint>");
+    return;
+  } //sees if the arguments match the syntax of the command (prevent a nullptr error)
+
+  int channel = atoi(arg1);
+  double s = atof(arg2);
   switch (channel) {
     case 1: 
       s1 = s;
