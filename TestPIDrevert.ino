@@ -99,7 +99,7 @@ NOTES
     - Page 73 stores the default default hold logic value                                   (uint8_t)
 
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-*/
+//*/
 
 #include "qCommand.h"
 #include <math.h>
@@ -155,16 +155,9 @@ void getADC2(void);
 void getADC3(void);
 void getADC4(void);
 
-
 // Timing measurement functions
 void timing_stats(qCommand& qC, Stream& S);
 void reset_timing(qCommand& qC, Stream& S);
-
-
-uint64_t isr1_cycles_sum = 0;
-uint64_t isr2_cycles_sum = 0;
-uint64_t isr3_cycles_sum = 0;
-uint64_t isr4_cycles_sum = 0;
 // ← END OF FORWARD DECLARATIONS ↑
 
 ////////////////////////////////////////////////////////////////////////////////////
@@ -181,6 +174,23 @@ volatile uint32_t isr2_entry_count = 0;
 volatile uint32_t isr3_entry_count = 0;
 volatile uint32_t isr4_entry_count = 0;
 // ← END ↑
+
+  // DIGITAL SETPOINTS (WIP)
+
+int setpin1 = 9;
+int setpin2 = 10;
+int setpin3 = 11;
+int setpin4 = 12;
+
+bool use_digital_set1 = false;
+bool use_digital_set2 = false;
+bool use_digital_set3 = false;
+bool use_digital_set4 = false;
+
+double digset_low1 = 0.0, digset_high1 = 5.0;
+double digset_low2 = 0.0, digset_high2 = 5.0;
+double digset_low3 = 0.0, digset_high3 = 5.0;
+double digset_low4 = 0.0, digset_high4 = 5.0;
 
 // Initialize LED
 bool purple = false;
@@ -347,26 +357,25 @@ int reset4 = 0;
 ////////////////////////////////////////////////////////////////////////////////////
 // TIMING MEASUREMENT VARIABLES     ////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////
-// Timing statistics variables
-uint32_t isr1_cycles_min = 0xFFFFFFFF;
-uint32_t isr1_cycles_max = 0;
-uint32_t isr1_count = 0;
+volatile uint32_t isr1_cycles_min = 0xFFFFFFFF;
+volatile uint32_t isr1_cycles_max = 0;
+volatile uint32_t isr1_cycles_avg = 0;
+volatile uint32_t isr1_count = 0;
 
+volatile uint32_t isr2_cycles_min = 0xFFFFFFFF;
+volatile uint32_t isr2_cycles_max = 0;
+volatile uint32_t isr2_cycles_avg = 0;
+volatile uint32_t isr2_count = 0;
 
-uint32_t isr2_cycles_min = 0xFFFFFFFF;
-uint32_t isr2_cycles_max = 0;
-uint32_t isr2_count = 0;
+volatile uint32_t isr3_cycles_min = 0xFFFFFFFF;
+volatile uint32_t isr3_cycles_max = 0;
+volatile uint32_t isr3_cycles_avg = 0;
+volatile uint32_t isr3_count = 0;
 
-
-uint32_t isr3_cycles_min = 0xFFFFFFFF;
-uint32_t isr3_cycles_max = 0;
-uint32_t isr3_count = 0;
-
-
-uint32_t isr4_cycles_min = 0xFFFFFFFF;
-uint32_t isr4_cycles_max = 0;
-uint32_t isr4_count = 0;
-
+volatile uint32_t isr4_cycles_min = 0xFFFFFFFF;
+volatile uint32_t isr4_cycles_max = 0;
+volatile uint32_t isr4_cycles_avg = 0;
+volatile uint32_t isr4_count = 0;
 
 // PID Gain Constants (initialization)
 
@@ -402,6 +411,13 @@ void setup(void) {
   setDebugWord(0x11110001);
   Serial.begin(115200); //change baud rate based on how often we want to read out values from serial
 
+  setLED(1, 0, 1);  // Magenta = startup complete
+  delay(1000);
+  setLED(0, 1, 0);  // Green = ready
+  
+  Serial.println("Setup complete - LED should be GREEN");
+  Serial.printf("enable1=%d, hold1=%d, config=0x%02X\n", enable1, hold1, config);
+
   ///////////////
   // ENABLE ARM CYCLE COUNTER FOR TIMING MEASUREMENT
   ///////////////
@@ -424,6 +440,17 @@ void setup(void) {
   pinMode(6, OUTPUT);
   pinMode(7, OUTPUT);
   pinMode(8, OUTPUT);
+
+
+  //Setting up digital setpoint pins (WIP)
+  pinMode(setpin1, INPUT_PULLDOWN);
+  pinMode(setpin2, INPUT_PULLDOWN);
+  pinMode(setpin3, INPUT_PULLDOWN);
+  pinMode(setpin4, INPUT_PULLDOWN);
+
+  //Serial cmds for digital setpoints (WIP)
+  qC.addCommand("digiset", &dig_set_en);
+  qC.addCommand("digisetRange", &dig_set_rng);
 
   setDebugWord(0x11110002);
 
@@ -669,65 +696,96 @@ void setup(void) {
   // Memory
   qC.addCommand("erase", &eraseNVM);
   qC.addCommand("reveal", &revealMemory);
-
 // ← ADD THESE TWO LINES HERE ↓
   // Timing measurement
   qC.addCommand("timing", &timing_stats);
   qC.addCommand("reset_timing", &reset_timing);
-  qC.addCommand("save", &save_params);
-  qC.addCommand("rescue", &save_params);
-
   // ← END OF ADDITION ↑
   // Default (accident)
   qC.addCommand("", accident);
 }
+
 void test_timing(qCommand& qC, Stream& S) {
-  setDebugWord(0xFFFFFFFF);
+  setDebugWord(0xFFFF001E);
   
-  float cpu_mhz = F_CPU / 1000000.0f;
+  // Test 1: Measure a known delay
+  uint32_t start = ARM_DWT_CYCCNT;
+  delayMicroseconds(10);  // Known 10 microsecond delay
+  uint32_t end = ARM_DWT_CYCCNT;
+  uint32_t elapsed = end - start;
   
-  S.printf("Channel 1 ISR Timing (%u samples):\n", isr1_count);
-  S.printf("Min: %.2f us\n", isr1_cycles_min / cpu_mhz);
-  if (isr1_count > 0) {
-    S.printf("Avg: %.2f us\n", (isr1_cycles_sum / (float)isr1_count) / cpu_mhz);
+  S.printf("Test: 10us delay measured as %u cycles = %.2f us\n", elapsed, elapsed / 600.0);
+  S.printf("Expected: ~6000 cycles\n");
+  
+  if (elapsed < 3000) {
+    S.printf("ERROR: Cycle counter is running too slow or CPU is not 600MHz\n");
+    S.printf("Actual CPU speed might be: %.0f MHz\n", elapsed / 10.0);
+  } else if (elapsed > 9000) {
+    S.printf("ERROR: Cycle counter is running too fast\n");
   } else {
-    S.printf("Avg: 0.00 us\n");
+    S.printf("Cycle counter looks OK\n");
   }
-  S.printf("Max: %.2f us\n", isr1_cycles_max / cpu_mhz);
-  S.println("  ");
-  
-  S.printf("Channel 2 ISR Timing (%u samples):\n", isr2_count);
-  S.printf("Min: %.2f us\n", isr2_cycles_min / cpu_mhz);
-  if (isr2_count > 0) {
-    S.printf("Avg: %.2f us\n", (isr2_cycles_sum / (float)isr2_count) / cpu_mhz);
-  } else {
-    S.printf("Avg: 0.00 us\n");
-  }
-  S.printf("Max: %.2f us\n", isr2_cycles_max / cpu_mhz);
-  S.println("  ");
-  
-  S.printf("Channel 3 ISR Timing (%u samples):\n", isr3_count);
-  S.printf("Min: %.2f us\n", isr3_cycles_min / cpu_mhz);
-  if (isr3_count > 0) {
-    S.printf("Avg: %.2f us\n", (isr3_cycles_sum / (float)isr3_count) / cpu_mhz);
-  } else {
-    S.printf("Avg: 0.00 us\n");
-  }
-  S.printf("Max: %.2f us\n", isr3_cycles_max / cpu_mhz);
-  S.println("  ");
-  
-  S.printf("Channel 4 ISR Timing (%u samples):\n", isr4_count);
-  S.printf("Min: %.2f us\n", isr4_cycles_min / cpu_mhz);
-  if (isr4_count > 0) {
-    S.printf("Avg: %.2f us\n", (isr4_cycles_sum / (float)isr4_count) / cpu_mhz);
-  } else {
-    S.printf("Avg: 0.00 us\n");
-  }
-  S.printf("Max: %.2f us\n", isr4_cycles_max / cpu_mhz);
-  S.println("  ");
-  
-  S.printf("Budget (t_res): %.2f us\n", t_res);
 }
+
+////////////////////////////////////////////////////////////////////////////////////
+// DIGITAL SETPOINT (WIP) //////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////
+
+// Syntax: digset <chan> <0|1>
+// Enables the use of a digital setpoint
+
+
+void dig_set_en(qCommand& qC, Stream& S){
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+  if(!arg1 || !arg2){
+    S.println("Syntax: digiset <chan> <0|1>");
+    return;
+  } //sees if the arguments match the syntax of the command (prevent a nullptr error)
+
+  int chan = atoi(arg1);
+  int state = atoi(arg2);
+  bool b = (state != 0); //is bit 0 or 1
+
+  switch(chan){
+    case 1: use_digital_set1 = b; break;
+    case 2: use_digital_set2 = b; break;
+    case 3: use_digital_set3 = b; break;
+    case 4: use_digital_set4 = b; break;
+    default: S.println("Channel selected must be 1-4"); return;
+  }
+  S.printf("Digital setpoint on channel %d: %d\n", chan, b);
+}
+
+// Syntax: digisetRange <chan> <v_low> <v_high>
+// Selects the voltage range for a digital setpoint
+
+void dig_set_rng(qCommand& qC, Stream& S){
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+  char* arg3 = qC.next();
+
+  if(!arg1 || !arg2 || !arg3){
+    S.println("Syntax: digisetRange <chan> <v_low> <v_high>"); 
+    return;
+  }
+  
+  int chan = atoi(arg1);
+  double v_low = atof(arg2);
+  double v_high = atof(arg3);
+
+  switch(chan){
+    case 1: digset_low1 = v_low; digset_high1 = v_high; break;
+    case 2: digset_low2 = v_low; digset_high2 = v_high; break;
+    case 3: digset_low3 = v_low; digset_high3 = v_high; break;
+    case 4: digset_low4 = v_low; digset_high4 = v_high; break;
+    default: S.println("Channel selected must be 1-4"); return;
+  }
+  S.printf("Channel %d digital setpoint: LOW = %.3f V, HIGH = %.3f V\n", chan, v_low, v_high);
+}
+
+
+
 ////////////////////////////////////////////////////////////////////////////////////
 // LED CONFIG               ////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////
@@ -814,6 +872,8 @@ void write_val(qCommand& qC, Stream& S) { //debugging method intended to investi
   if (default_hold == 1) {
     val = HIGH;
   } else {val = LOW;}
+  
+  /*
   if (atoi(qC.next()) != NULL) {
     int pinOut = atoi(qC.current()) + 4; // assumes digital in pin X is connected to digital out pin (X + 4) i.e. 1 --> 5, 2 --> 6, 3 --> 7, 4 --> 8
     digitalWrite(pinOut, val);
@@ -823,6 +883,21 @@ void write_val(qCommand& qC, Stream& S) { //debugging method intended to investi
     digitalWrite(6, val);
     digitalWrite(7, val);
     digitalWrite(8, val);
+  }
+  */
+
+  char* arg = qC.next();          // get pointer, may be NULL
+  if (arg != NULL) {              // safe check
+      int chan = atoi(arg);       // convert text to int
+      int pinOut = chan + 4;      // now add 4
+      digitalWrite(pinOut, val);
+      S.printf("Wrote %i to PIN %i\n", default_hold, pinOut);
+  } else {
+      // no argument → apply to all
+      digitalWrite(5, val);
+      digitalWrite(6, val);
+      digitalWrite(7, val);
+      digitalWrite(8, val);
   }
 }
 
@@ -834,6 +909,8 @@ void unwrite_val(qCommand& qC, Stream& S) { //debugging method intended to inves
   if (default_hold == 1) {
     val = LOW;
   } else {val = HIGH;}
+
+  /*
   if (atoi(qC.next()) != NULL) {
     int pinOut = atoi(qC.current()) + 4; // assumes digital in pin X is connected to digital out pin (X + 4) i.e. 1 --> 5, 2 --> 6, 3 --> 7, 4 --> 8
     digitalWrite(pinOut, val);
@@ -843,6 +920,21 @@ void unwrite_val(qCommand& qC, Stream& S) { //debugging method intended to inves
     digitalWrite(6, val);
     digitalWrite(7, val);
     digitalWrite(8, val);
+  }
+  */
+
+  char* arg = qC.next();          // get pointer, may be NULL
+  if (arg != NULL) {              // safe check
+      int chan = atoi(arg);       // convert text to int
+      int pinOut = chan + 4;      // now add 4
+      digitalWrite(pinOut, val);
+      S.printf("Wrote %i to PIN %i\n", default_hold, pinOut);
+  } else {
+      // no argument → apply to all
+      digitalWrite(5, val);
+      digitalWrite(6, val);
+      digitalWrite(7, val);
+      digitalWrite(8, val);
   }
 }
 
@@ -1564,7 +1656,9 @@ void get_gain(qCommand& qC, Stream& S) {
   double i = -1.0;
   double d = -1.0;
   double s = -1.0;
-  if (atoi(qC.next()) != NULL) {
+  
+  char* arg = qC.next();
+  if (arg != NULL) {
     int chan = atoi(qC.current());
       switch(chan) {
           case 1:
@@ -1608,7 +1702,9 @@ void readADC(qCommand& qC, Stream& S) {
   //referenced as "input X" 
   setDebugWord(0xFFFF1004);
   double voltage = 0.0;  
-  if (atoi(qC.next()) != NULL) {
+
+  char* arg = qC.next();
+  if (arg != NULL) {
     int channel = atoi(qC.current());
     if (channel == 1) {
         voltage = in1;
@@ -1630,7 +1726,9 @@ void getOutput(qCommand& qC, Stream& S) {
   // referenced as "output X"
   setDebugWord(0xFFFF1005);
   double vOut = 0.0;
-  if (atoi(qC.next()) != NULL) {
+
+  char* arg = qC.next();
+  if (arg != NULL) {
     int channel = atoi(qC.current());
     if (channel == 1) {
         vOut = out1 - offset1;
@@ -1651,7 +1749,9 @@ void getError(qCommand& qC, Stream& S) {
   // referenced as "error X"
   setDebugWord(0xFFFF200E);
   double vOut = 0.0;
-  if (atoi(qC.next()) != NULL) {
+  
+  char* arg = qC.next();
+  if (arg != NULL) {
     int channel = atoi(qC.current());
     if (channel == 1) {
         vOut = err1;
@@ -1851,95 +1951,100 @@ void check_hold(qCommand& qC, Stream& S) {
   S.printf("%d\n", digitalRead(atoi(qC.next())));
   
 }
-
+// ← ADD THIS NEW FUNCTION HERE ↓
+ void timing_stats(qCommand& qC, Stream& S) {
+  setDebugWord(0xFFFF001C);
+  
   // Get which channel to report (or all if no argument)
   int chan = 0;
-void timing_stats(qCommand& qC, Stream& S) {
-  setDebugWord(0xFFFFFFFF);
-  
-  float cpu_mhz = F_CPU / 1000000.0f;
-  int chan = 0;
-  
-  if (qC.next() != NULL) {
-    chan = atoi(qC.current());
+  char* arg = qC.next();
+  if (arg != NULL) {
+    chan = atoi(arg);
+  } else {
+    chan = 0;
   }
   
   if (chan == 0 || chan == 1) {
+    float min_us = isr1_cycles_min / 600.0;
+    float max_us = isr1_cycles_max / 600.0;
+    float avg_us = isr1_cycles_avg / 600.0;
     S.printf("Channel 1 ISR Timing (%u samples):\n", isr1_count);
-    S.printf("Min: %.2f us\n", isr1_cycles_min / cpu_mhz);
-    if (isr1_count > 0) {
-      S.printf("Avg: %.2f us\n", (isr1_cycles_sum / (float)isr1_count) / cpu_mhz);
-    } else {
-      S.printf("Avg: 0.00 us\n");
+    S.printf("  Min: %.2f us\n", min_us);
+    S.printf("  Avg: %.2f us\n", avg_us);
+    S.printf("  Max: %.2f us\n", max_us);
+    if (max_us > t_res) {
+      S.printf("  WARNING: OVERRUN by %.2f us!\n", max_us - t_res);
     }
-    S.printf("Max: %.2f us\n", isr1_cycles_max / cpu_mhz);
-    S.println("  ");
+    S.println();
   }
   
   if (chan == 0 || chan == 2) {
+    float min_us = isr2_cycles_min / 600.0;
+    float max_us = isr2_cycles_max / 600.0;
+    float avg_us = isr2_cycles_avg / 600.0;
     S.printf("Channel 2 ISR Timing (%u samples):\n", isr2_count);
-    S.printf("Min: %.2f us\n", isr2_cycles_min / cpu_mhz);
-    if (isr2_count > 0) {
-      S.printf("Avg: %.2f us\n", (isr2_cycles_sum / (float)isr2_count) / cpu_mhz);
-    } else {
-      S.printf("Avg: 0.00 us\n");
+    S.printf("  Min: %.2f us\n", min_us);
+    S.printf("  Avg: %.2f us\n", avg_us);
+    S.printf("  Max: %.2f us\n", max_us);
+    if (max_us > t_res) {
+      S.printf("  WARNING: OVERRUN by %.2f us!\n", max_us - t_res);
     }
-    S.printf("Max: %.2f us\n", isr2_cycles_max / cpu_mhz);
-    S.println("  ");
+    S.println();
   }
   
   if (chan == 0 || chan == 3) {
+    float min_us = isr3_cycles_min / 600.0;
+    float max_us = isr3_cycles_max / 600.0;
+    float avg_us = isr3_cycles_avg / 600.0;
     S.printf("Channel 3 ISR Timing (%u samples):\n", isr3_count);
-    S.printf("Min: %.2f us\n", isr3_cycles_min / cpu_mhz);
-    if (isr3_count > 0) {
-      S.printf("Avg: %.2f us\n", (isr3_cycles_sum / (float)isr3_count) / cpu_mhz);
-    } else {
-      S.printf("Avg: 0.00 us\n");
+    S.printf("  Min: %.2f us\n", min_us);
+    S.printf("  Avg: %.2f us\n", avg_us);
+    S.printf("  Max: %.2f us\n", max_us);
+    if (max_us > t_res) {
+      S.printf("  WARNING: OVERRUN by %.2f us!\n", max_us - t_res);
     }
-    S.printf("Max: %.2f us\n", isr3_cycles_max / cpu_mhz);
-    S.println("  ");
+    S.println();
   }
   
   if (chan == 0 || chan == 4) {
+    float min_us = isr4_cycles_min / 600.0;
+    float max_us = isr4_cycles_max / 600.0;
+    float avg_us = isr4_cycles_avg / 600.0;
     S.printf("Channel 4 ISR Timing (%u samples):\n", isr4_count);
-    S.printf("Min: %.2f us\n", isr4_cycles_min / cpu_mhz);
-    if (isr4_count > 0) {
-      S.printf("Avg: %.2f us\n", (isr4_cycles_sum / (float)isr4_count) / cpu_mhz);
-    } else {
-      S.printf("Avg: 0.00 us\n");
+    S.printf("  Min: %.2f us\n", min_us);
+    S.printf("  Avg: %.2f us\n", avg_us);
+    S.printf("  Max: %.2f us\n", max_us);
+    if (max_us > t_res) {
+      S.printf("  WARNING: OVERRUN by %.2f us!\n", max_us - t_res);
     }
-    S.printf("Max: %.2f us\n", isr4_cycles_max / cpu_mhz);
-    S.println("  ");
+    S.println();
   }
   
   S.printf("Budget (t_res): %.2f us\n", t_res);
 }
 
 void reset_timing(qCommand& qC, Stream& S) {
-  setDebugWord(0xFFFFFFFE);
+  setDebugWord(0xFFFF001D);
   
-  // Reset channel 1
+  // Reset all timing statistics
   isr1_cycles_min = 0xFFFFFFFF;
   isr1_cycles_max = 0;
-  isr1_cycles_sum = 0;
+  isr1_cycles_avg = 0;
   isr1_count = 0;
   
-  // Reset channel 2
   isr2_cycles_min = 0xFFFFFFFF;
   isr2_cycles_max = 0;
-  isr2_cycles_sum = 0;
+  isr2_cycles_avg = 0;
   isr2_count = 0;
   
-  // Reset channel 3
   isr3_cycles_min = 0xFFFFFFFF;
   isr3_cycles_max = 0;
-  isr3_cycles_sum = 0;
+  isr3_cycles_avg = 0;
   isr3_count = 0;
   
-  // Reset channel 4
   isr4_cycles_min = 0xFFFFFFFF;
   isr4_cycles_max = 0;
-  isr4_cycles_sum = 0;
+  isr4_cycles_avg = 0;
   isr4_count = 0;
   
   S.println("Timing statistics reset");
@@ -1952,116 +2057,148 @@ void reset_timing(qCommand& qC, Stream& S) {
 
 
 // Initialize integral and previous error values on channel 1
-static double integral1 = 0;
-static double prev_err1 = 0;
+static double integral1 = 0; // discrete integral accumuluates starting from 0
+static double prev_err1 = 0; // prev1_err1 updates starting from 0 --> this is the previous error from the last time step
 
 void getADC1(void) {
-  // ============================================================
-  // TIMING START - MUST BE FIRST
-  // ============================================================
+  // ← TIMING START ↓
   isr1_entry_count++;
-  uint32_t start_cycles = ARM_DWT_CYCCNT;
+
+  ///*
+  uint32_t start_cycles = ARM_DWT_CYCCNT;  // Start timing
+  // ← TIMING END ↑
   
   setDebugWord(0xFFFF2100);
-  in1 = readADC1_from_ISR();
-  
-  if (feed_set1) {
-    s1 = in3;
-  }
-  
-  prev_err1 = err1;
-  err1 = in1 - s1;
-  
+
+   in1 = readADC1_from_ISR(); //read ADC voltage
+
+   // (WIP) prioritizing digi setpoint over feed_set1; otherwise read from ADC
+
+   
+   if (use_digital_set1) {
+      int bit = digitalRead(setpin1); // reads setpoint pin if digital high (bit = 1) or digital low (bit = 0)
+      s1 = bit ? digset_high1 : digset_low1; // map s1 to the high voltage defined in digi_set_rng() if logic high; otherwise set to low voltage if logic low
+   } else if (feed_set1) {
+      s1 = in3; // grab the setpoint from ADC input 3 if we are feeding a setpoint for channel 1
+    }
+
+   // Calculate error term
+   prev_err1 = err1;
+   err1 = in1 - s1; // current error
+
+
   setDebugWord(0xFFFF2101);
-  if (default_hold == 0) {
-    hold1 = !digitalRead(1);
-  } else {
-    hold1 = digitalRead(1);
-  }
-  
-  setDebugWord(0xFFFF2102);
-  bool isServo1 = !feed_set3 && !track_error3 && enable1 && !bool(hold1);
-  
-  if (isServo1) {
-    setLED(0,1,0);
-    
-    if (track_error1) {
-      out3 = err1;
-      writeDAC(3, err1);
-    }
-    
-    if (abs(err1) <= lock1_precision) {
-      isLock1 = true;
-      digitalWrite(5, HIGH);
-    } else {
-      isLock1 = false;
-      digitalWrite(5, LOW);
-    }
-    
-    double proportional1 = err1 * p1;
-    
-    if (reset1) {
-      integral1 = 0;
-      reset1 = 0;
-    }
-    
-    integral1 += err1 * i1 * (t_res);
-    
-    if (integral1 > rail1_max) {
-      integral1 = rail1_max;
-    } else if (integral1 < rail1_min) {
-      integral1 = rail1_min;
-    }
-    
-    double differential1 = (err1 - prev_err1) * d1 / (t_res);
-    out1 = proportional1 + integral1 + differential1;
-  }
-  else if (track_error3 || feed_set3) {
-    setLED(1,0,0);
-    enable1 = 0;
-    hold1 = !default_hold;
-    track_error1 = 0;
-    feed_set1 = 0;
-    
-    if (track_error3) {
-      out1 = err3;
-      amp1 = 0;
-      pd1 = 0;
-      phi1 = 0;
-      offset1 = 0;
-    }
-    if (feed_set3) {
-      s3 = in1;
+   if (default_hold == 0) {
+      // hold1 = (!digitalRead(1) + 1) % 2;
+      hold1 = !digitalRead(1);
+   } else {
+      hold1 = digitalRead(1);
+   }
+   setDebugWord(0xFFFF2102);
+
+   
+   bool isServo1 = !feed_set3 && !track_error3 && enable1 && !bool(hold1);
+   if (isServo1) { //perform servoing on channel 1
+       setLED(0,1,0); //green
+       
+       // Monitoring the error term
+       if (track_error1) {
+         out3 = err1;
+         writeDAC(3, err1); // write the error on the servo channel to the paired DAC, that way the paired ADC does not need to be enabled
+        }
+       
+       // Determine the lock status and output to digital output
+       if (abs(err1) <= lock1_precision) {
+         isLock1 = true; // isLock allows access to this boolean from the GUI
+         digitalWrite(5, HIGH); // without the GUI, the user can still have access to the lock boolean
+       } else {
+         isLock1 = false;
+         digitalWrite(5, LOW);
+       }
+       
+       // Proportional gain calculation
+       
+       double proportional1 = err1 * p1; //proportional gain
+      
+      //  Integral gain calculation + reset in case of transients
+       if (reset1) { //reset the integral upon user command
+         integral1 = 0;
+         reset1 = 0;
+        }
+       integral1 += err1 * i1 * (t_res); // add K_i * err(t) * dt (convert to microseconds)
+       // Integrator Rail to avoid significant overhead drift
+
+       if (integral1 > rail1_max) { // force integral to rail if it overshoots the user-set rail
+         integral1 = rail1_max;
+       } else if (integral1 < rail1_min) {
+         integral1 = rail1_min;
+         }
+       // Differential gain calculation
+       double differential1 = (err1 - prev_err1) * d1 / (t_res); // turn diff down for accurate BW measurement
+       // Total Control Correction Output
+       out1 = proportional1 + integral1 + differential1; // sum of correction factors
+      // ALTERNATIVE TO INTEGRAL RAIL: Rail the integrator only when the final output is still over voltage
+      // This way, the proportional and differential still have the chance to pull down the integral before it rails.
+      //  if (out1 > rail1_max || out1 < rail1_min) {
+        //  if (integral1 > rail1_max) { // force integral to rail if it overshoots the user-set rail
+        //    integral1 = rail1_max;
+        //  } else if (integral1 < rail1_min) {
+        //    integral1 = rail1_min;
+        //    }
+      //    out1 = proportional1 + integral1 + differential1; // recalculate sum of correction factors
+      //  }
+   }
+   else if (track_error3 || feed_set3) { // Servo on PID 3 is being TRACKED or FED by DAC/ADC 1
+        setLED(1,0,0);
+        // force stop the conditionals which are lower in hierarchy
+        enable1 = 0;
+        hold1 = !default_hold;
+        // force stop the conditionals which conflict with servoing on PID 3
+        track_error1 = 0;
+        feed_set1 = 0;
+        if (track_error3) {// track the error of channel 3 on DAC 1
+            out1 = err3;
+            // Do not allow sweeping on the output when tracking the error of PID 3
+            amp1 = 0;
+            pd1 = 0;
+            phi1 = 0;
+            offset1 = 0;
+        }
+        if (feed_set3) { // feed_set3 is active
+            s3 = in1;
+            out1 = 0;
+        }
+   }
+   else if (!enable1) { // output the sweep only when servo is disabled and there is no setpoint feeding or error tracking
+      setLED(0,0,1);
       out1 = 0;
-    }
-  }
-  else if (!enable1) {
-    setLED(0,0,1);
-    out1 = 0;
-    reset1 = 1;
-    hold1 = !default_hold;
-  } else {
-    setLED(1,1,0);
-    out1 = -out1 + offset1;
-    sweep1 = false;
-  }
-  
-  // Add sweep (if desired)
-  if (sweep1 && pd1 > 0 && !bool(hold1)) {
-    if (pd1 < t_res * 10.0) {
-      sweep1 = false;
-    } else {
-      switch (swp_typ1) {
-        case 0: // sinusoid
+      reset1 = 1;
+      hold1 = !default_hold;
+   } else {
+     setLED(1,1,0); //yellow
+     out1 = -out1 + offset1; // we want to hold this value, but later we invert the output for negative feedback and also add the offset... so we flip it here
+     sweep1 = false; // Don't allow sweeping if we are holding the output
+     }
+    // Add sweep (if desired) to current DAC output - OPTIMIZED WITH INTERPOLATION
+   if (sweep1 && pd1 > 0 && !bool(hold1)) {
+     // Safety check: period must be at least 10x the ISR rate
+     if (pd1 < t_res * 10.0) {
+       sweep1 = false;  // Disable sweep if period is too small
+     } else {
+       switch (swp_typ1) {
+        case 0: // sinusoid - LOOKUP TABLE WITH LINEAR INTERPOLATION
           {
+            // Calculate phase with offset
             float phase_time = t1 - phi1;
             if (phase_time < 0) phase_time += pd1;
             
+            // Map to table index with fractional part
             float table_pos = (phase_time / pd1) * 256.0f;
             uint32_t index1 = (uint32_t)table_pos % 256;
             uint32_t index2 = (index1 + 1) % 256;
             float frac = table_pos - floorf(table_pos);
             
+            // Linear interpolation between two table entries
             float sine_val = SINE_TABLE[index1] * (1.0f - frac) + SINE_TABLE[index2] * frac;
             out1 = out1 + amp1 * sine_val;
             break;
@@ -2069,157 +2206,172 @@ void getADC1(void) {
         case 1: // sawtooth
           {
             float phase = (t1 - phi1) / pd1;
-            phase = phase - floorf(phase);
-            out1 = out1 + amp1 * (2.0f * phase - 1.0f);
+            phase = phase - floorf(phase);  // Wrap to [0, 1]
+            out1 = out1 + amp1 * (2.0f * phase - 1.0f);  // Map to [-1, 1]
             break;
           }
         case 2: // triangle
           {
             float phase = (t1 + phi1) / pd1;
-            phase = phase - floorf(phase);
-            out1 = out1 + amp1 * (4.0f * fabsf(phase - 0.5f) - 1.0f);
+            phase = phase - floorf(phase);  // Wrap to [0, 1]
+            out1 = out1 + amp1 * (4.0f * fabsf(phase - 0.5f) - 1.0f);  // Triangle wave
             break;
           }
         default:
-          break;
+            break;
       }
       
       t1 += t_res * 1e-6f;
-      if (t1 >= pd1) t1 = 0;
-    }
-  } else {
-    t1 = 0;
-  }
-  
-  out1 = -out1 + offset1;
-  
-  if (out1 > rail1_max) {
-    setLED(0,1,1);
-    out1 = rail1_max;
-    railed1 = true;
-  } else if (out1 < rail1_min) {
-    setLED(1,0,1);
-    out1 = rail1_min;
-    railed1 = true;
-  } else {
-    railed1 = false;
-  }
-  
-  writeDAC(1, out1);
-  
-  // ============================================================
-  // TIMING END - MUST BE LAST
-  // ============================================================
-  // TIMING END - SIMPLIFIED
+      if (t1 >= pd1) t1 = 0;  // Reset time when period completes
+     }
+   } else {
+     t1 = 0;       
+   }
+   out1 = -out1 + offset1; // invert for negative feedback
+  //  User-set rail
+   if (out1 > rail1_max) {
+      setLED(0,1,1);
+      out1 = rail1_max;
+      railed1 = true;
+    } else if (out1 < rail1_min) {
+      setLED(1,0,1);
+      out1 = rail1_min;
+      railed1 = true;
+    } else {railed1 = false;}
+   writeDAC(1, out1);
+
+   
+  // ← TIMING START ↓
+  // Calculate timing statistics
   uint32_t end_cycles = ARM_DWT_CYCCNT;
   uint32_t elapsed = end_cycles - start_cycles;
   
+  // Track min/max/average
   if (elapsed < isr1_cycles_min) isr1_cycles_min = elapsed;
   if (elapsed > isr1_cycles_max) isr1_cycles_max = elapsed;
-  isr1_cycles_sum += elapsed;
+  isr1_cycles_avg = (isr1_cycles_avg * isr1_count + elapsed) / (isr1_count + 1);
   isr1_count++;
+  // ← TIMING END ↑
+
+  //*/
 }
 
-
 // Initialize integral and previous error values on channel 2
-static double integral2 = 0;
+static double integral2 = 0; // discrete integral accumuluates starting from 0
 static double prev_err2 = 0;
-
 void getADC2(void) {
-  // ============================================================
-  // TIMING START - MUST BE FIRST
-  // ============================================================
+  // ← TIMING START ↓
   isr2_entry_count++;
-  uint32_t start_cycles = ARM_DWT_CYCCNT;
+
+  ///*
+  uint32_t start_cycles = ARM_DWT_CYCCNT;  // Start timing
+  // ← TIMING END ↑
   
   setDebugWord(0xFFFF2200);
-  in2 = readADC2_from_ISR();
-  
-  if (feed_set2) {
-    s2 = in4;
-  }
-  
-  prev_err2 = err2;
-  err2 = in2 - s2;
-  
+   in2 = readADC2_from_ISR(); //read ADC voltage
+
+   /* if (use_digital_set2) {
+      int bit = digitalRead(setpin2);
+      s2 = bit ? digset_high2 : digset_low2; // map s2 to a given voltage if bit is set to 1, otherwise keep as 0.00 V
+   } else */
+   if (feed_set2) {
+      s2 = in4; // grab the setpoint from ADC input 4 if we are feeding a setpoint for channel 2
+   }
+   // Calculate error terms for trapezoid approximation
+   prev_err2 = err2; // error at step (n-1)
+   err2 = in2 - s2; // current error at step (n)
   setDebugWord(0xFFFF2201);
-  if (default_hold == 0) {
-    hold2 = !digitalRead(2);
-  } else {
-    hold2 = digitalRead(2);
-  }
-  
-  setDebugWord(0xFFFF2202);
-  bool isServo2 = !feed_set4 && !track_error4 && enable2 && !bool(hold2);
-  
-  if (isServo2) {
-    if (track_error2) {
-      out4 = err2;
-      writeDAC(4, err2);
-    }
-    
-    if (abs(err2) <= lock2_precision) {
-      isLock2 = true;
-      digitalWrite(6, HIGH);
-    } else {
-      isLock2 = false;
-      digitalWrite(6, LOW);
-    }
-    
-    double proportional2 = err2 * p2;
-    
-    if (reset2) {
-      integral2 = 0;
-      reset2 = 0;
-    }
-    
-    integral2 += i2 * err2 * (t_res);
-    
-    if (integral2 > 10) {
-      integral2 = 10;
-    } else if (integral2 < -10) {
-      integral2 = -10;
-    }
-    
-    double differential2 = (err2 - prev_err2) * d2 / (t_res);
-    out2 = proportional2 + integral2 + differential2;
-  }
-  else if (track_error4 || feed_set4) {
-    enable2 = 0;
-    hold2 = !default_hold;
-    track_error2 = 0;
-    feed_set2 = 0;
-    
-    if (track_error4) {
-      out2 = err4;
-      amp2 = 0;
-      pd2 = 0;
-      phi2 = 0;
-      offset2 = 0;
-    }
-    if (feed_set4) {
-      s4 = in2;
-      out2 = 0;
-    }
-  }
-  else if (!enable2) {
-    out2 = 0;
-    reset2 = 1;
-    hold2 = !default_hold;
-  } else {
-    out2 = -out2 + offset2;
-    sweep2 = false;
-  }
-  
-  setDebugWord(0xFFFF2203);
-  
-  // Add sweep (if desired)
-  if (sweep2 && pd2 > 0 && !bool(hold2)) {
-    if (pd2 < t_res * 10.0) {
-      sweep2 = false;
-    } else {
-      switch (swp_typ2) {
-        case 0: // sinusoid
+   if (default_hold == 0) {
+      hold2 = !digitalRead(2);
+   } else {
+      hold2 = digitalRead(2);
+   }
+   setDebugWord(0xFFFF2202);
+   bool isServo2 = !feed_set4 && !track_error4 && enable2 && !bool(hold2);
+   if (isServo2) { //perform servoing on channel 2
+       // Monitoring the error term
+       if (track_error2) {
+         out4 = err2;
+         writeDAC(4, err2); // write the error on the servo channel to the paired DAC, that way the paired ADC does not need to be enabled
+        }
+       // Determine the lock status and output to LED
+       if (abs(err2) <= lock2_precision) {
+         isLock2 = true; // isLock allows access to this boolean from the GUI
+         digitalWrite(6, HIGH); // without the GUI, the user can still have access to the lock boolean
+       } else {
+         isLock2 = false;
+         digitalWrite(6, LOW);
+       }
+       // Proportional gain calculation
+       double proportional2 = err2 * p2; //proportional gain
+       // Integral gain calculation + reset in case of transients
+       if (reset2) { //reset the integral upon user command
+         integral2 = 0;
+         reset2 = 0;
+        }
+       integral2 += i2 * err2 * (t_res); // add K_i * err(t) * dt
+       // Integrator Rail to avoid significant overhead drift
+       if (integral2 > 10) { // force integral to rail if it overloads the absolute maximum DAC output
+         integral2 = 10;
+       } else if (integral2 < -10) {
+         integral2 = -10;
+         }
+      //  if (integral2 > rail2_max) { // force integral to rail if it overshoots the user-set rail
+      //    integral2 = rail2_max;
+      //  } else if (integral2 < rail2_min) {
+      //    integral2 = rail2_min;
+      //    }
+       // Differential gain calculation
+       double differential2 = (err2 - prev_err2) * d2 / (t_res); // turn diff down for accuracate BW measurement
+       // Total Control Correction Output
+       out2 = proportional2 + integral2 + differential2; // sum of correction factors
+       // ALTERNATIVE TO INTEGRAL RAIL: Rail the integrator only when the final output is still over voltage
+       // This way, the proportional and differential still have the chance to pull down the integral before it rails.
+       //  if (out2 > rail2_max || out2 < rail2_min) {
+          //  if (integral2 > rail2_max) { // force integral to rail if it overshoots the user-set rail
+          //    integral2 = rail2_max;
+          //  } else if (integral2 < rail2_min) {
+          //    integral2 = rail2_min;
+          //    }
+       //    out2 = proportional2 + integral2 + differential2; // sum of correction factors
+       //  }
+   }
+   else if (track_error4 || feed_set4) { // Servo on PID 4 is being TRACKED or FED by DAC/ADC 2
+        // force stop the conditionals which are lower in hierarchy
+        enable2 = 0;
+        hold2 = !default_hold;
+        // force stop the conditionals which conflict with servoing on PID 2
+        track_error2 = 0;
+        feed_set2 = 0;
+        if (track_error4) {// track the error of channel 4 on DAC 2
+            out2 = err4;
+            // Do not allow sweeping on the output when tracking the error of PID 4
+            amp2 = 0;
+            pd2 = 0;
+            phi2 = 0;
+            offset2 = 0;
+        }
+        if (feed_set4) { // feed_set4 is active
+            s4 = in2;
+            out2 = 0;
+        }
+   }
+   else if (!enable2) { // output the sweep only when servo is disabled and there is no setpoint feeding or error tracking
+       out2 = 0;
+       reset2 = 1;
+       hold2 = !default_hold;
+   } else {
+     out2 = -out2 + offset2; // we want to hold this value, but later we invert the output for negative feedback and also add the offset... so we flip it here
+     sweep2 = false; // Don't allow sweeping if we are holding the output
+     }
+    setDebugWord(0xFFFF2203);
+     // Add sweep (if desired) to current DAC output - OPTIMIZED WITH INTERPOLATION
+   if (sweep2 && pd2 > 0 && !bool(hold2)) {
+     if (pd2 < t_res * 10.0) {
+       sweep2 = false;
+     } else {
+       switch (swp_typ2) {
+        case 0: // sinusoid - LOOKUP TABLE WITH LINEAR INTERPOLATION
           {
             float phase_time = t2 - phi2;
             if (phase_time < 0) phase_time += pd2;
@@ -2248,144 +2400,155 @@ void getADC2(void) {
             break;
           }
         default:
-          break;
+            break;
       }
       
-      t2 = t2 + (t_res * 1e-6f);
-    }
-  } else {
-    t2 = 0;
-  }
-  
-  out2 = -out2 + offset2;
-  
-  if (out2 > rail2_max) {
-    out2 = rail2_max;
-    railed2 = true;
-  } else if (out2 < rail2_min) {
-    out2 = rail2_min;
-    railed2 = true;
-  } else {
-    railed2 = false;
-  }
-  
-  writeDAC(2, out2);
-  
-  // ============================================================
-  // TIMING END - MUST BE LAST
-  // ============================================================
-    // TIMING END - SIMPLIFIED
+      t2 += t_res * 1e-6f;
+      if (t2 >= pd2) t2 = 0;
+     }
+   } else {
+     t2 = 0;       
+   }
+   out2 = -out2 + offset2; // invert for negative feedback
+   // User-set rail
+   if (out2 > rail2_max) {
+      out2 = rail2_max;
+      railed2 = true;
+    } else if (out2 < rail2_min) {
+      out2 = rail2_min;
+      railed2 = true;
+    } else {railed2 = false;}
+   writeDAC(2, out2);
+   
+  // ← TIMING START ↓
+  // Calculate timing statistics
   uint32_t end_cycles = ARM_DWT_CYCCNT;
   uint32_t elapsed = end_cycles - start_cycles;
   
+  // Track min/max/average
   if (elapsed < isr2_cycles_min) isr2_cycles_min = elapsed;
   if (elapsed > isr2_cycles_max) isr2_cycles_max = elapsed;
-  isr2_cycles_sum += elapsed;
+  isr2_cycles_avg = (isr2_cycles_avg * isr2_count + elapsed) / (isr2_count + 1);
   isr2_count++;
+  // ← TIMING END ↑
+
+  //*/
 }
-
-
-
-
 // Initialize integral and previous error values on channel 3
-static double integral3 = 0;
-static double prev_err3 = 0;
-
+static double integral3 = 0; // discrete integral accumuluates starting from 0
+static double prev_err3 = 0; // prev_err3 updates starting from 0 --> this is the previous error from the last time step
 void getADC3(void) {
-  // ============================================================
-  // TIMING START - MUST BE FIRST
-  // ============================================================
+  // ← TIMING START ↓
   isr3_entry_count++;
-  uint32_t start_cycles = ARM_DWT_CYCCNT;
+
+  ///*
+  uint32_t start_cycles = ARM_DWT_CYCCNT;  // Start timing
+  // ← TIMING END ↑
   
   setDebugWord(0xFFFF2300);
-  in3 = readADC3_from_ISR();
-  
-  if (feed_set3) {
-    s3 = in1;
-  }
-  
-  prev_err3 = err3;
-  err3 = in3 - s3;
-  
+   in3 = readADC3_from_ISR(); //read ADC voltage
+
+
+   /* if (use_digital_set3) {
+      int bit = digitalRead(setpin3);
+      s3 = bit ? digset_high3 : digset_low3; // map s3 to a given voltage if bit is set to 1, otherwise keep as 0.00 V
+   } else */ if (feed_set3) {
+      s3 = in1; // grab the setpoint from ADC input 1 if we are feeding a setpoint for channel 3
+   }
+   // Calculate error terms for trapezoid approximation
+   prev_err3 = err3; // error at step (n-1)
+   err3 = in3 - s3; // current error at step (n)
   setDebugWord(0xFFFF2301);
-  if (default_hold == 0) {
-    hold3 = !digitalRead(3);
-  } else {
-    hold3 = digitalRead(3);
-  }
-  
-  setDebugWord(0xFFFF2302);
-  bool isServo3 = !feed_set1 && !track_error1 && enable3 && !bool(hold3);
-  
-  if (isServo3) {
-    if (track_error3) {
-      out1 = err3;
-      writeDAC(1, err3);
-    }
-    
-    if (abs(err3) <= lock3_precision) {
-      isLock3 = true;
-      digitalWrite(7, HIGH);
-    } else {
-      isLock3 = false;
-      digitalWrite(7, LOW);
-    }
-    
-    double proportional3 = err3 * p3;
-    
-    if (reset3) {
-      integral3 = 0;
-      reset3 = 0;
-    }
-    
-    integral3 += i3 * err3 * (t_res);
-    
-    if (integral3 > 10) {
-      integral3 = 10;
-    } else if (integral3 < -10) {
-      integral3 = -10;
-    }
-    
-    double differential3 = (err3 - prev_err3) * d3 / (t_res);
-    out3 = proportional3 + integral3 + differential3;
-  }
-  else if (track_error1 || feed_set1) {
-    enable3 = 0;
-    hold3 = !default_hold;
-    track_error3 = 0;
-    feed_set3 = 0;
-    
-    if (track_error1) {
-      out3 = err1;
-      amp3 = 0;
-      pd3 = 0;
-      phi3 = 0;
-      offset3 = 0;
-    }
-    if (feed_set1) {
-      s1 = in3;
-      out3 = 0;
-    }
-  }
-  else if (!enable3) {
-    out3 = 0;
-    reset3 = 1;
-    hold3 = !default_hold;
-  } else {
-    out3 = -out3 + offset3;
-    sweep3 = false;
-  }
-  
+   if (default_hold == 0) {
+      hold3 = !digitalRead(3);
+   } else {
+      hold3 = digitalRead(3);
+   }
+   setDebugWord(0xFFFF2302);
+   bool isServo3 = !feed_set1 && !track_error1 && enable3 && !bool(hold3);
+   if (isServo3) { //perform servoing on channel 3
+       // Monitoring the error term
+       if (track_error3) {
+         out1 = err3;
+         writeDAC(1, err3); // write the error on the servo channel to the paired DAC, that way the paired ADC does not need to be enabled
+        }
+       // Determine the lock status and output to LED
+       if (abs(err3) <= lock3_precision) {
+         isLock3 = true; // isLock allows access to this boolean from the GUI
+         digitalWrite(7, HIGH); // without the GUI, the user can still have access to the lock boolean
+       } else {
+         isLock3 = false;
+         digitalWrite(7, LOW);
+       }
+       // Proportional gain calculation
+       double proportional3 = err3 * p3; //proportional gain
+       // Integral gain calculation + reset in case of transients
+       if (reset3) { //reset the integral upon user command
+         integral3 = 0;
+        }
+       integral3 += i3 * err3 * (t_res); // add K_i * err(t) * dt
+       // Integrator Rail to avoid significant overhead drift
+       if (integral3 > 10) { // force integral to rail if it overloads the absolute maximum DAC output
+         integral3 = 10;
+       } else if (integral3 < -10) {
+         integral3 = -10;         
+         }
+      //  if (integral3 > rail3_max) { // force integral to rail if it overshoots the user-set rail
+      //    integral3 = rail3_max;
+      //  } else if (integral3 < rail3_min) {
+      //    integral3 = rail3_min;
+      //    }
+       // Differential gain calculation
+       double differential3 = (err3 - prev_err3) * d3 / (t_res); // turn diff down for accuracate BW measurement
+       // Total Control Correction Output
+       out3 = proportional3 + integral3 + differential3; // sum of correction factors
+       // ALTERNATIVE TO INTEGRAL RAIL: Rail the integrator only when the final output is still over voltage
+       // This way, the proportional and differential still have the chance to pull down the integral before it rails.
+       //  if (out3 > rail3_max || out3 < rail3_min) {
+          //  if (integral3 > rail3_max) { // force integral to rail if it overshoots the user-set rail
+          //    integral3 = rail3_max;
+          //  } else if (integral3 < rail3_min) {
+          //    integral3 = rail3_min;
+          //    }
+       //    out3 = proportional3 + integral3 + differential3; // sum of correction factors
+       //  }
+   }
+   else if (track_error1 || feed_set1) { // Servo on PID 1 is being TRACKED or FED by DAC/ADC 3
+        // force stop the conditionals which are lower in hierarchy
+        enable3 = 0;
+        hold3 = !default_hold;
+        // force stop the conditionals which conflict with servoing on PID 3
+        track_error3 = 0;
+        feed_set3 = 0;
+        if (track_error1) {// track the error of channel 1 on DAC 3
+            out3 = err1;
+            // Do not allow sweeping on the output when tracking the error of PID 1
+            amp3 = 0;
+            pd3 = 0;
+            phi3 = 0;
+            offset3 = 0;
+        }
+        if (feed_set1) { // feed_set1 is active
+            s1 = in3;
+            out3 = 0;
+        }
+   }
+   else if (!enable3) { // output the sweep only when servo is disabled and there is no setpoint feeding or error tracking
+       out3 = 0;
+       reset3 = 1;
+       hold3 = !default_hold;
+   } else {
+     out3 = -out3 + offset3; // we want to hold this value, but later we invert the output for negative feedback and also add the offset... so we flip it here
+     sweep3 = false; // Don't allow sweeping if we are holding the output
+     }
   setDebugWord(0xFFFF2303);
-  
-  // Add sweep (if desired)
-  if (sweep3 && pd3 > 0 && !bool(hold3)) {
-    if (pd3 < t_res * 10.0) {
-      sweep3 = false;
-    } else {
-      switch (swp_typ3) {
-        case 0: // sinusoid
+     // Add sweep (if desired) to current DAC output - OPTIMIZED WITH INTERPOLATION
+   if (sweep3 && pd3 > 0 && !bool(hold3)) {
+     if (pd3 < t_res * 10.0) {
+       sweep3 = false;
+     } else {
+       switch (swp_typ3) {
+        case 0: // sinusoid - LOOKUP TABLE WITH LINEAR INTERPOLATION
           {
             float phase_time = t3 - phi3;
             if (phase_time < 0) phase_time += pd3;
@@ -2414,143 +2577,167 @@ void getADC3(void) {
             break;
           }
         default:
-          break;
+            break;
       }
       
-      t3 = t3 + (t_res * 1e-6f);
-    }
-  } else {
-    t3 = 0;
-  }
-  
-  out3 = -out3 + offset3;
-  
-  if (out3 > rail3_max) {
-    out3 = rail3_max;
-    railed3 = true;
-  } else if (out3 < rail3_min) {
-    out3 = rail3_min;
-    railed3 = true;
-  } else {
-    railed3 = false;
-  }
-  
-  writeDAC(3, out3);
-  
-  // ============================================================
-  // TIMING END - MUST BE LAST
-  // ============================================================
-   // TIMING END - SIMPLIFIED
+      t3 += t_res * 1e-6f;
+      if (t3 >= pd3) t3 = 0;
+     }
+   } else {
+     t3 = 0;       
+   }
+   out3 = -out3 + offset3; // invert for negative feedback
+   // User-set rail
+   if (out3 > rail3_max) {
+      out3 = rail3_max;
+      railed3 = true;
+    } else if (out3 < rail3_min) {
+      out3 = rail3_min;
+      railed3 = true;
+    } else {railed3 = false;}
+   writeDAC(3, out3);
+   
+  // ← TIMING START ↓
+  // Calculate timing statistics
   uint32_t end_cycles = ARM_DWT_CYCCNT;
   uint32_t elapsed = end_cycles - start_cycles;
   
+  // Track min/max/average
   if (elapsed < isr3_cycles_min) isr3_cycles_min = elapsed;
   if (elapsed > isr3_cycles_max) isr3_cycles_max = elapsed;
-  isr3_cycles_sum += elapsed;
+  isr3_cycles_avg = (isr3_cycles_avg * isr3_count + elapsed) / (isr3_count + 1);
   isr3_count++;
+  // ← TIMING END ↑
+
+  //*/
 }
 
-
-
 // Initialize integral and previous error values on channel 4
-static double integral4 = 0;
-static double prev_err4 = 0;
+static double integral4 = 0; // discrete integral accumuluates starting from 0
+static double prev_err4 = 0; // prev_err4 updates starting from 0 --> this is the previous error from the last time step
 
 void getADC4(void) {
-  // ============================================================
-  // TIMING START - MUST BE FIRST
-  // ============================================================
   isr4_entry_count++;
+
+  ///*
   uint32_t start_cycles = ARM_DWT_CYCCNT;
-  
+
   setDebugWord(0xFFFF2400);
-  in4 = readADC4_from_ISR();
-  
-  if (feed_set4) {
-    s4 = in2;
-  }
-  
-  prev_err4 = err4;
-  err4 = in4 - s4;
-  
+   in4 = readADC4_from_ISR(); //read ADC voltage
+
+   /* if (use_digital_set4) {
+      int bit = digitalRead(setpin4);
+      s4 = bit ? digset_high4 : digset_low4; // map s1 to a given voltage if bit is set to 1, otherwise keep as 0.00 V
+   } else */ if (feed_set4) {
+         s4 = in2; // grab the setpoint from ADC input 2 if we are feeding a setpoint for channel 4
+       }
+   
+   // Calculate error terms for trapezoid approximation
+   prev_err4 = err4; // error at step (n-1)
+   err4 = in4 - s4; // current error at step (n)
   setDebugWord(0xFFFF2401);
-  if (default_hold == 0) {
-    hold4 = !digitalRead(4);
-  } else {
-    hold4 = digitalRead(4);
-  }
-  
-  setDebugWord(0xFFFF2402);
-  bool isServo4 = !feed_set2 && !track_error2 && enable4 && !bool(hold4);
-  
-  if (isServo4) {
-    if (track_error4) {
-      out2 = err4;
-      writeDAC(2, err4);
-    }
-    
-    if (abs(err4) <= lock4_precision) {
-      isLock4 = true;
-      digitalWrite(8, HIGH);
-    } else {
-      isLock4 = false;
-      digitalWrite(8, LOW);
-    }
-    
-    double proportional4 = err4 * p4;
-    
-    if (reset4) {
-      integral4 = 0;
-      reset4 = 0;
-    }
-    
-    integral4 += i4 * err4 * (t_res);
-    
-    if (integral4 > 10) {
-      integral4 = 10;
-    } else if (integral4 < -10) {
-      integral4 = -10;
-    }
-    
-    double differential4 = (err4 - prev_err4) * d4 / (t_res);
-    out4 = proportional4 + integral4 + differential4;
-  }
-  else if (track_error2 || feed_set2) {
-    enable4 = 0;
-    hold4 = !default_hold;
-    track_error4 = 0;
-    feed_set4 = 0;
-    
-    if (track_error2) {
-      out4 = err2;
-      amp4 = 0;
-      pd4 = 0;
-      phi4 = 0;
-      offset4 = 0;
-    }
-    if (feed_set2) {
-      s2 = in4;
-      out4 = 0;
-    }
-  }
-  else if (!enable4) {
-    out4 = 0;
-    reset4 = 1;
-    hold4 = !default_hold;
-  } else {
-    out4 = -out4 + offset4;
-    sweep4 = false;
-  }
-  
-  setDebugWord(0xFFFF2403);
-  
-  // Add sweep (if desired)
-  if (sweep4 && pd4 > 0 && !bool(hold4)) {
-    if (pd4 < t_res * 10.0) {
-      sweep4 = false;
-    } else {
-      switch (swp_typ4) {
-        case 0: // sinusoid
+   if (default_hold == 0) {
+      hold4 = !digitalRead(4);
+   } else {
+      hold4 = digitalRead(4);
+   }
+   setDebugWord(0xFFFF2402);
+   bool isServo4 = !feed_set2 && !track_error2 && enable4 && !bool(hold4);
+   if (isServo4) { //perform servoing on channel 4
+       
+       // Monitoring the error term
+       if (track_error4) {
+         out2 = err4;
+         writeDAC(2, err4); // write the error on the servo channel to the paired DAC, that way the paired ADC does not need to be enabled
+        }
+       // Determine the lock status and output to LED
+       if (abs(err4) <= lock4_precision) {
+         isLock4 = true; // isLock allows access to this boolean from the GUI
+         digitalWrite(8, HIGH); // without the GUI, the user can still have access to the lock boolean
+       } else {
+         isLock4 = false;
+         digitalWrite(8, LOW);
+       }
+
+       // Proportional gain calculation
+       double proportional4 = err4 * p4; //proportional gain
+
+       // Integral gain calculation + reset in case of transients
+       if (reset4) { //reset the integral upon user command
+         integral4 = 0;
+        }
+
+       integral4 += i4 * err4 * (t_res); // add K_i * err(t) * dt
+
+       // Integrator Rail to avoid significant overhead drift
+       
+       if (integral4 > 10) { // force integral to rail if it overloads the absolute maximum DAC output
+         integral4 = 10;
+       } else if (integral4 < -10) {
+         integral4 = -10;
+         }
+
+      //  if (integral4 > rail4_max) { // force integral to rail if it overshoots the user-set rail
+      //    integral4 = rail4_max;
+      //  } else if (integral4 < rail4_min) {
+      //    integral4 = rail4_min;
+      //    }
+
+       // Differential gain calculation
+       double differential4 = (err4 - prev_err4) * d4 / (t_res); // turn diff down for accuracate BW measurement
+
+       // Total Control Correction Output
+       out4 = proportional4 + integral4 + differential4; // sum of correction factors
+
+      // ALTERNATIVE TO INTEGRAL RAIL: Rail the integrator only when the final output is still over voltage
+      // This way, the proportional and differential still have the chance to pull down the integral before it rails.
+
+      //  if (out4 > rail4_max || out4 < rail4_min) {
+          //  if (integral4 > rail4_max) { // force integral to rail if it overshoots the user-set rail
+          //    integral4 = rail4_max;
+          //  } else if (integral4 < rail4_min) {
+          //    integral4 = rail4_min;
+          //    }
+      //    out4 = proportional4 + integral4 + differential4; // sum of correction factors
+      //  }
+   } 
+   else if (track_error2 || feed_set2) { // Servo on PID 2 is being TRACKED or FED by DAC/ADC 4
+        // force stop the conditionals which are lower in hierarchy
+        enable4 = 0;
+        hold4 = !default_hold;
+        // force stop the conditionals which conflict with servoing on PID 2
+        track_error4 = 0;
+        feed_set4 = 0;
+          
+        if (track_error2) {// track the error of channel 2 on DAC 4
+            out4 = err2;
+            // Do not allow sweeping on the output when tracking the error of PID 2
+            amp4 = 0;
+            pd4 = 0;
+            phi4 = 0;
+            offset4 = 0;
+        }
+        if (feed_set2) { // feed_set2 is active
+            s2 = in4;
+            out4 = 0;
+        }
+   } 
+   else if (!enable4) { // output the sweep only when servo is disabled and there is no setpoint feeding or error tracking
+       out4 = 0;
+       reset4 = 1;
+       hold4 = !default_hold;
+   } else {
+     out4 = -out4 + offset4; // we want to hold this value, but later we invert the output for negative feedback and also add the offset... so we flip it here
+     sweep4 = false; // Don't allow sweeping if we are holding the output
+     } 
+   setDebugWord(0xFFFF2403);
+     // Add sweep (if desired) to current DAC output - OPTIMIZED WITH INTERPOLATION
+   if (sweep4 && pd4 > 0 && !bool(hold4)) {
+     if (pd4 < t_res * 10.0) {
+       sweep4 = false;
+     } else {
+       switch (swp_typ4) {
+        case 0: // sinusoid - LOOKUP TABLE WITH LINEAR INTERPOLATION
           {
             float phase_time = t4 - phi4;
             if (phase_time < 0) phase_time += pd4;
@@ -2579,152 +2766,36 @@ void getADC4(void) {
             break;
           }
         default:
-          break;
+            break;
       }
       
-      t4 = t4 + (t_res * 1e-6f);
-    }
-  } else {
-    t4 = 0;
-  }
-  
-  out4 = -out4 + offset4;
-  
-  if (out4 > rail4_max) {
-    out4 = rail4_max;
-    railed4 = true;
-  } else if (out4 < rail4_min) {
-    out4 = rail4_min;
-    railed4 = true;
-  } else {
-    railed4 = false;
-  }
-  
-  writeDAC(4, out4);
-  
-  // ============================================================
-  // TIMING END - MUST BE LAST
-  // ============================================================
-    // TIMING END - SIMPLIFIED
-  uint32_t end_cycles = ARM_DWT_CYCCNT;
-  uint32_t elapsed = end_cycles - start_cycles;
-  
-  if (elapsed < isr4_cycles_min) isr4_cycles_min = elapsed;
-  if (elapsed > isr4_cycles_max) isr4_cycles_max = elapsed;
-  isr4_cycles_sum += elapsed;
-  isr4_count++;
-}
+      t4 += t_res * 1e-6f;
+      if (t4 >= pd4) t4 = 0;
+     }
+   } else {
+     t4 = 0;       
+   }
+   out4 = -out4 + offset4; // invert for negative feedback
 
+   // User-set rail
+   if (out4 > rail4_max) {
+      out4 = rail4_max;
+      railed4 = true;
+    } else if (out4 < rail4_min) {
+      out4 = rail4_min;
+      railed4 = true;
+    } else {railed4 = false;}
 
-
-
-void save_params(qCommand& qC, Stream& S) {
-  setDebugWord(0xFEEDFACE);
-  
-  S.println("Saving all parameters to NVM...");
-  
-  // Save PID gains
-  writeNVMpages(&p1, sizeof(p1), 0);
-  writeNVMpages(&p2, sizeof(p2), 1);
-  writeNVMpages(&p3, sizeof(p3), 2);
-  writeNVMpages(&p4, sizeof(p4), 3);
-  
-  writeNVMpages(&i1, sizeof(i1), 4);
-  writeNVMpages(&i2, sizeof(i2), 5);
-  writeNVMpages(&i3, sizeof(i3), 6);
-  writeNVMpages(&i4, sizeof(i4), 7);
-  
-  writeNVMpages(&d1, sizeof(d1), 8);
-  writeNVMpages(&d2, sizeof(d2), 9);
-  writeNVMpages(&d3, sizeof(d3), 10);
-  writeNVMpages(&d4, sizeof(d4), 11);
-  
-  // Save setpoints
-  writeNVMpages(&s1, sizeof(s1), 12);
-  writeNVMpages(&s2, sizeof(s2), 13);
-  writeNVMpages(&s3, sizeof(s3), 14);
-  writeNVMpages(&s4, sizeof(s4), 15);
-  
-  // Save offsets
-  writeNVMpages(&offset1, sizeof(offset1), 16);
-  writeNVMpages(&offset2, sizeof(offset2), 17);
-  writeNVMpages(&offset3, sizeof(offset3), 18);
-  writeNVMpages(&offset4, sizeof(offset4), 19);
-  
-  // Save config
-  writeNVMpages(&config, sizeof(config), 20);
-  
-  // Save enable states
-  writeNVMpages(&enable1, sizeof(enable1), 25);
-  writeNVMpages(&enable2, sizeof(enable2), 26);
-  writeNVMpages(&enable3, sizeof(enable3), 27);
-  writeNVMpages(&enable4, sizeof(enable4), 28);
-  
-  // Save tracking states
-  writeNVMpages(&track_error1, sizeof(track_error1), 29);
-  writeNVMpages(&track_error2, sizeof(track_error2), 30);
-  writeNVMpages(&track_error3, sizeof(track_error3), 31);
-  writeNVMpages(&track_error4, sizeof(track_error4), 32);
-  
-  // Save feeding states
-  writeNVMpages(&feed_set1, sizeof(feed_set1), 33);
-  writeNVMpages(&feed_set2, sizeof(feed_set2), 34);
-  writeNVMpages(&feed_set3, sizeof(feed_set3), 35);
-  writeNVMpages(&feed_set4, sizeof(feed_set4), 36);
-  
-  // Save sweep states
-  writeNVMpages(&sweep1, sizeof(sweep1), 37);
-  writeNVMpages(&sweep2, sizeof(sweep2), 38);
-  writeNVMpages(&sweep3, sizeof(sweep3), 39);
-  writeNVMpages(&sweep4, sizeof(sweep4), 40);
-  
-  // Save sweep parameters
-  writeNVMpages(&amp1, sizeof(amp1), 41);
-  writeNVMpages(&amp2, sizeof(amp2), 42);
-  writeNVMpages(&amp3, sizeof(amp3), 43);
-  writeNVMpages(&amp4, sizeof(amp4), 44);
-  
-  writeNVMpages(&pd1, sizeof(pd1), 45);
-  writeNVMpages(&pd2, sizeof(pd2), 46);
-  writeNVMpages(&pd3, sizeof(pd3), 47);
-  writeNVMpages(&pd4, sizeof(pd4), 48);
-  
-  writeNVMpages(&phi1, sizeof(phi1), 49);
-  writeNVMpages(&phi2, sizeof(phi2), 50);
-  writeNVMpages(&phi3, sizeof(phi3), 51);
-  writeNVMpages(&phi4, sizeof(phi4), 52);
-  
-  writeNVMpages(&swp_typ1, sizeof(swp_typ1), 53);
-  writeNVMpages(&swp_typ2, sizeof(swp_typ2), 54);
-  writeNVMpages(&swp_typ3, sizeof(swp_typ3), 55);
-  writeNVMpages(&swp_typ4, sizeof(swp_typ4), 56);
-  
-  // Save ADC ranges
-  writeNVMpages(&adc1_range, sizeof(adc1_range), 57);
-  writeNVMpages(&adc2_range, sizeof(adc2_range), 58);
-  writeNVMpages(&adc3_range, sizeof(adc3_range), 59);
-  writeNVMpages(&adc4_range, sizeof(adc4_range), 60);
-  
-  // Save rails
-  writeNVMpages(&rail1_min, sizeof(rail1_min), 61);
-  writeNVMpages(&rail2_min, sizeof(rail2_min), 62);
-  writeNVMpages(&rail3_min, sizeof(rail3_min), 63);
-  writeNVMpages(&rail4_min, sizeof(rail4_min), 64);
-  
-  writeNVMpages(&rail1_max, sizeof(rail1_max), 65);
-  writeNVMpages(&rail2_max, sizeof(rail2_max), 66);
-  writeNVMpages(&rail3_max, sizeof(rail3_max), 67);
-  writeNVMpages(&rail4_max, sizeof(rail4_max), 68);
-  
-  // Save lock precision
-  writeNVMpages(&lock1_precision, sizeof(lock1_precision), 69);
-  writeNVMpages(&lock2_precision, sizeof(lock2_precision), 70);
-  writeNVMpages(&lock3_precision, sizeof(lock3_precision), 71);
-  writeNVMpages(&lock4_precision, sizeof(lock4_precision), 72);
-  
-  // Save default hold
-  writeNVMpages(&default_hold, sizeof(default_hold), 73);
-  
-  S.println("All parameters saved to NVM!");
-  S.println("Press RESET button to reload, or power cycle.");
+   writeDAC(4, out4);
+    
+    // Calculate timing statistics
+    uint32_t end_cycles = ARM_DWT_CYCCNT;
+    uint32_t elapsed = end_cycles - start_cycles;
+    
+    // Track min/max/average
+    if (elapsed < isr4_cycles_min) isr4_cycles_min = elapsed;
+    if (elapsed > isr4_cycles_max) isr4_cycles_max = elapsed;
+    isr4_cycles_avg = (isr4_cycles_avg * isr4_count + elapsed) / (isr4_count + 1);
+    isr4_count++;
+  //*/
 }
