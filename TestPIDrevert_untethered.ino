@@ -716,11 +716,21 @@ void setup(void) {
     qC.assignVariable("stepsperperiod" + ch, &sq[ch].steps_per_period);
 
     qC.assignVariable("value" + ch, &sq[ch].value);
-    
+
     //qC.assignVariable(&sq[ch].duty,      sizeof(sq[ch].duty),      (base + 1) * 128);
     //qC.assignVariable(&sq[ch].vpp_set,   sizeof(sq[ch].vpp_set),   (base + 2) * 128);
     //qC.assignVariable(&sq[ch].amp_scale, sizeof(sq[ch].amp_scale), (base + 3) * 128);
   }
+
+  qC.assignVariable("rail 1 min", &rail1_min);
+  qC.assignVariable("rail 2 min", &rail2_min);
+  qC.assignVariable("rail 3 min", &rail3_min);
+  qC.assignVariable("rail 4 min", &rail4_min);
+  
+  qC.assignVariable("rail 1 max", &rail1_max);
+  qC.assignVariable("rail 2 max", &rail2_max);
+  qC.assignVariable("rail 3 max", &rail3_max);
+  qC.assignVariable("rail 4 max", &rail4_max);
 
   // COMMANDS
   setDebugWord(0x11110016);
