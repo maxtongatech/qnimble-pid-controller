@@ -738,7 +738,7 @@ void setup(void) {
   qC.addCommand("toggle", &toggleSquareWave);
   qC.addCommand("freq",&setFrequencySquare);
   qC.addCommand("duty",&setDutyCycleSquare);
-
+  qC.addCommand("brails", &setRailsBipolar);
 
   // Reading on ADC channels
   qC.addCommand("servos", &read_servos);
