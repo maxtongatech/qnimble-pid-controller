@@ -1,0 +1,1105 @@
+from PyQt5.QtCore import QIODevice, pyqtSignal
+from PyQt5.QtSerialPort import QSerialPort, QSerialPortInfo
+from PyQt5.QtGui import QFontDatabase, QTextOption, QTextCursor, QIcon
+from PyQt5.QtWidgets import (QWidget, QGridLayout, QFormLayout, QHBoxLayout,
+                             QComboBox, QCheckBox, QPushButton, QTextBrowser, 
+                             QLineEdit, QFileDialog)
+import yaml
+from collections import OrderedDict
+import os
+
+"""
+SerialTerminal Widget 
+
+Core code from here: https://github.com/sria91/SerialTerminal/blob/master/serial_terminal_widget.py
+
+Adjusted to handle qNimbles in the way that we run them. Hard coded the selection menus because I don't 
+see a current reason to confuse the user / add the connectibility options as these should be tied to 
+firmware and hardware versions. Simply uncomment the ordered dictionaries if you want this capability.
+
+TODO: Fix save log
+TODO: Add aliases
+TODO: Allow indirect calls for serials sends, and add handling of messages
+"""
+class SerialTerminalWidget(QWidget):
+    baudrates = OrderedDict([
+        ('1200', QSerialPort.Baud1200),
+        ('2400', QSerialPort.Baud2400),
+        ('4800', QSerialPort.Baud4800),
+        ('9600', QSerialPort.Baud9600),
+        ('19200', QSerialPort.Baud19200),
+        ('38400', QSerialPort.Baud38400),
+        ('57600', QSerialPort.Baud57600),
+        ('115200', QSerialPort.Baud115200)
+    ])
+    databits = OrderedDict([
+        ('5', QSerialPort.Data5),
+        ('6', QSerialPort.Data6),
+        ('7', QSerialPort.Data7),
+        ('8', QSerialPort.Data8)
+    ])
+    paritybit = OrderedDict([
+        ('None', QSerialPort.NoParity),
+        ('Even', QSerialPort.EvenParity),
+        ('Odd', QSerialPort.OddParity),
+        ('Mark', QSerialPort.MarkParity),
+        ('Space', QSerialPort.SpaceParity)
+    ])
+    stopbits = OrderedDict([
+        ('1', QSerialPort.OneStop),
+        ('1.5', QSerialPort.OneAndHalfStop),
+        ('2', QSerialPort.TwoStop)
+    ])
+    flowcontrol = OrderedDict([
+        ('None', QSerialPort.NoFlowControl),
+        ('Hardware', QSerialPort.FlowControl),
+    ])
+    lineendings = OrderedDict([
+        ('None', ''),
+        ('LF', '\n'),
+        ('CR', '\r'),
+        ('CR/LF', '\r\n')
+    ])
+    serports = OrderedDict()
+
+    # Flags
+    verbose = False      # Displays internal commands on the terminal
+    internal = False    # This is an internal flag that indicates an 
+                        # external (e.g., from cmd line) or internal
+                        # command
+    aliasActive = False # Tracks if aliases are used
+    functional = False  # Tracks function calls from terminal
+    textFinished = pyqtSignal(bool)
+    serialOpen = pyqtSignal(bool)   # Indicates that the serial is open
+
+    def __init__(self, parent=None):
+        super(SerialTerminalWidget, self).__init__(parent)
+
+        fixed_width_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        
+        self.methods = get_class_methods()
+        self.functinoal = False
+        # Make log file dir if needed
+        fd = QFileDialog()
+        dir = fd.directory().absolutePath() + '/logs/'
+        logfile_location =  dir + formate_filename()
+        # quick check if the log directory exists. 
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+        self.logfile_location = logfile_location
+
+        self.setLayout(QGridLayout())
+        self.serialport = None
+        self.fl_autoscroll = None
+        self.fl_hexinput = None
+        self.fl_log = None
+        self.logfile = None
+        self.last_command = ''
+
+        self.qfl = QFormLayout()
+        self.layout().addLayout(self.qfl, 0, 0)
+
+        self.qcb_ports = QComboBox()
+        self.qcb_ports.setMinimumWidth(150)
+        self.qcb_ports.currentTextChanged.connect(self.slot_ports)
+        self.qfl.addRow("Serial Port:", self.qcb_ports)
+
+        self.qcb_baudrates = QComboBox()
+        self.qcb_baudrates.addItems(list(self.baudrates))
+        self.qcb_baudrates.currentTextChanged.connect(self.slot_baud)
+        self.qfl.addRow("Baud rate:", self.qcb_baudrates)
+
+        self.qcb_databits = QComboBox()
+        self.qcb_databits.addItems(list(self.databits))
+        self.qcb_databits.currentTextChanged.connect(self.slot_data)
+        self.qcb_paritybit = QComboBox()
+        self.qcb_paritybit.addItems(list(self.paritybit))
+        self.qcb_paritybit.currentTextChanged.connect(self.slot_parity)
+        self.qcb_stopbits = QComboBox()
+        self.qcb_stopbits.addItems(list(self.stopbits))
+        self.qcb_stopbits.currentTextChanged.connect(self.slot_stop)
+        self.qcb_flowcontrol = QComboBox()
+        self.qcb_flowcontrol.addItems(list(self.flowcontrol))
+        self.qcb_flowcontrol.currentTextChanged.connect(self.slot_flow)
+        self.qpb_refresh = QPushButton("Refresh")
+        self.qpb_refresh.clicked.connect(self.slot_refresh)
+        self.qpb_connect_disconnect = QPushButton("Connect")
+        self.qpb_connect_disconnect.clicked.connect(self.slot_connect)
+
+        self.qfl.addRow("Data bits:", self.qcb_databits)
+        self.qfl.addRow("Parity:", self.qcb_paritybit)
+        self.qfl.addRow("Stop bits:", self.qcb_stopbits)
+        self.qfl.addRow("Flow control:", self.qcb_flowcontrol)
+        self.qfl.addWidget(self.qpb_refresh)
+        self.qfl.addWidget(self.qpb_connect_disconnect)
+
+        self.qtb_receiver = QTextBrowser()
+        self.qtb_receiver.setWordWrapMode(QTextOption.NoWrap)
+        self.qtb_receiver.setFont(fixed_width_font)
+        self.qtb_receiver.setMinimumWidth(400)
+        self.layout().addWidget(self.qtb_receiver, 0, 1)
+
+        self.qhbl_receiver = QHBoxLayout()
+        self.qchb_autoscroll_receiver = QCheckBox("Autoscroll")
+        self.qchb_autoscroll_receiver.clicked.connect(self.slot_autoscroll)
+        self.qchb_autoscroll_receiver.click()
+        self.qhbl_receiver.addWidget(self.qchb_autoscroll_receiver)
+
+        # Logging panel...
+        self.qchb_receiver_log = QCheckBox("Log to")
+        self.qchb_receiver_log.clicked.connect(self.slot_log)
+        self.qhbl_receiver.addWidget(self.qchb_receiver_log)
+        self.qle_receiver_log = QLineEdit()
+        self.qle_receiver_log.setPlaceholderText(self.logfile_location)
+        self.qhbl_receiver.addWidget(self.qle_receiver_log)
+        self.qpb_receiver_log = QPushButton("...")
+        self.qpb_receiver_log.clicked.connect(self.slot_receiver_log)
+        
+        # Let's go ahead and start logging!
+        self.slot_receiver_log()
+
+
+        # Disable these. We can add them later if people truly want a specific log area. 
+        self.qchb_receiver_log.setDisabled(True)
+        self.qle_receiver_log.setDisabled(True)
+        self.qpb_receiver_log.setDisabled(True)
+
+        
+        self.qpb_receiver_log.setFixedWidth(30)
+        self.qhbl_receiver.addWidget(self.qpb_receiver_log)
+        self.qpb_clear_receiver = QPushButton("Clear")
+        self.qpb_clear_receiver.clicked.connect(self.slot_clear_receiver)
+        self.qpb_clear_receiver.setFixedWidth(70)
+        self.qhbl_receiver.addWidget(self.qpb_clear_receiver)
+        self.layout().addLayout(self.qhbl_receiver, 1, 1)
+
+        # Verbosity - will output other commands to terminal (e.g., buttons)
+        self.qchb_vinput = QCheckBox("Verbose?")
+        self.qchb_vinput.clicked.connect(self.slot_vinput)
+        self.qchb_vinput.setEnabled(True)
+
+        self.qle_sender = QLineEdit()
+        self.qle_sender.returnPressed.connect(self.return_pressed)
+        self.qcb_lineending = QComboBox()
+        self.qcb_lineending.addItems(self.lineendings)
+        self.qcb_lineending.currentTextChanged.connect(self.slot_lineending)
+        self.qpb_sender = QPushButton("Send")
+        self.qpb_sender.clicked.connect(self.slot_input)
+        self.qhbl_sender = QHBoxLayout()
+        self.qhbl_sender.addWidget(self.qchb_vinput)
+        
+        self.qhbl_sender.addWidget(self.qle_sender)
+        self.qhbl_sender.addWidget(self.qcb_lineending)
+        self.qhbl_sender.addWidget(self.qpb_sender)
+        self.layout().addLayout(self.qhbl_sender, 3, 1)
+
+        # self.qhbl_session = QHBoxLayout()
+        """ TODO: SAVE AND LOAD SESSIONS?"""
+        # self.qpb_save_session = QPushButton("Save session")
+        # self.qpb_save_session.clicked.connect(self.slot_save_session)
+        # self.qhbl_session.addWidget(self.qpb_save_session)
+        # self.qpb_load_session = QPushButton("Load session")
+        # self.qpb_load_session.clicked.connect(self.slot_load_session)
+        # self.qhbl_session.addWidget(self.qpb_load_session)
+        # self.layout().addLayout(self.qhbl_session, 3, 0)
+
+        self.serialport_name = None
+        self.baud = '115200'
+        self.data = '8'
+        self.parity = 'None'
+        self.stop = '1'
+        self.flow = 'None'
+        self.lineending = 'CR/LF'
+        self.fl_hexinput = True
+        self.slot_refresh()
+        
+    def slot_ports(self, serial_portname):
+        self.serialport_name = serial_portname
+
+    def slot_baud(self, baud):
+        self.baud = baud
+
+    def slot_data(self, data):
+        self.data = data
+
+    def slot_parity(self, parity):
+        self.parity = parity
+
+    def slot_stop(self, stop):
+        self.stop = stop
+
+    def slot_flow(self, flow):
+        self.flow = flow
+
+    def slot_lineending(self, lineending):
+        self.lineending = self.lineendings[lineending]
+
+    def slot_save_session(self):
+        d = OrderedDict([
+            ('baud', self.baud),
+            ('data', self.data),
+            ('parity', self.parity),
+            ('stop', self.stop),
+            ('flow', self.flow),
+            ('fl_autoscroll', self.fl_autoscroll),
+            ('fl_hexinput', self.fl_hexinput),
+            ('fl_log', self.fl_log),
+            ('logfile_location', self.logfile_location)
+        ])
+        with open('session.yaml', 'w') as f:
+            yaml.dump(d, f)
+
+    def slot_load_session(self):
+        with open('session.yaml', 'r') as f:
+            d = yaml.load(f)
+            self.baud = d['baud']
+            self.data = d['data']
+            self.parity = d['parity']
+            self.stop = d['stop']
+            self.flow = d['flow']
+            self.fl_autoscroll = d['fl_autoscroll']
+            self.fl_hexinput = d['fl_hexinput']
+            self.fl_log = d['fl_log']
+            self.logfile_location = d['logfile_location']
+        self.qchb_autoscroll_receiver.setChecked(self.fl_autoscroll is True)
+        self.qchb_vinput.setChecked(True)
+        self.qchb_receiver_log.setChecked(self.fl_log is True)
+        self.slot_refresh()
+        
+        self.qle_receiver_log.setText(self.logfile_location)
+
+    """This currently imbibes a log file location. We will bypass this and hardcode to a fit
+    a format that includes date / time for these."""
+    def slot_receiver_log(self):
+        self.qle_receiver_log.setText(self.logfile_location)
+        self.qchb_receiver_log.click()
+
+    def slot_log(self):
+        self.fl_log = True # hard code since for now we are always logging
+        if self.fl_log:
+            self.logfile = open(self.logfile_location, 'w+')
+            self.display(f'Log file for this session created at {self.logfile_location}')
+
+    def slot_vinput(self):
+        self.verbose = not self.verbose
+
+    def slot_clear_receiver(self):
+        self.qtb_receiver.clear()
+
+    def slot_refresh(self):
+        self.qcb_ports.clear()
+
+        self.qcb_ports.setCurrentText(self.serialport_name)
+        self.qcb_baudrates.setCurrentText(self.baud)
+        self.qcb_databits.setCurrentText(self.data)
+        self.qcb_paritybit.setCurrentText(self.parity)
+        self.qcb_stopbits.setCurrentText(self.stop)
+        self.qcb_lineending.setCurrentText(self.lineending)
+        self.qcb_flowcontrol.setCurrentText(self.flow)
+        
+        # We don't know if there are aliases yet!
+        self.aliasActive = False        
+        self.serports = [serialport.portName() for serialport in QSerialPortInfo.availablePorts()]
+        self.qcb_ports.clear() # flush anything that might have been there before
+        self.qcb_ports.addItems(self.serports)
+
+        flag,serialports = self.update_aliases()
+        if flag:
+            self.aliasActive = True
+            self.qcb_ports.clear()
+            self.serports = serialports
+            self.qcb_ports.addItems(list(serialports))  
+        else:
+            self.aliasActive = False      
+
+        # Comment these out if you want to be able to change these defaults...
+        self.qcb_baudrates.setDisabled(True)
+        self.qcb_databits.setDisabled(True)
+        self.qcb_paritybit.setDisabled(True)
+        self.qcb_stopbits.setDisabled(True)
+        self.qcb_flowcontrol.setDisabled(True)
+
+    """Bypass occurs during alias scanning to allow main window to skip init"""
+    def slot_connect(self, bypass=False):
+        self.serialport_name = self.qcb_ports.currentText()
+        self.serialport = QSerialPort()
+        if self.aliasActive:
+            aliasName = self.serialport_name
+            self.serialport_name = self.serports[self.serialport_name] # this is a dict
+        self.serialport.setPortName(self.serialport_name)
+        self.serialport.setBaudRate(
+            self.baudrates[self.qcb_baudrates.currentText()]
+        )
+        self.serialport.setDataBits(
+            self.databits[self.qcb_databits.currentText()]
+        )
+        self.serialport.setParity(
+            self.paritybit[self.qcb_paritybit.currentText()]
+        )
+        self.serialport.setStopBits(
+            self.stopbits[self.qcb_stopbits.currentText()]
+        )
+        self.serialport.setFlowControl(QSerialPort.NoFlowControl)
+        self.serialport.open(QIODevice.ReadWrite)
+        if self.serialport.isOpen():
+            self.serialport.readyRead.connect(self.ready_read)
+            self.qpb_connect_disconnect.setText("Disconnect")
+            self.qpb_connect_disconnect.disconnect()
+            self.qpb_connect_disconnect.clicked.connect(self.slot_disconnect)
+        
+            self.qcb_ports.setDisabled(True)
+            self.qcb_baudrates.setDisabled(True)
+            self.qcb_databits.setDisabled(True)
+            self.qcb_paritybit.setDisabled(True)
+            self.qcb_stopbits.setDisabled(True)
+            self.qcb_flowcontrol.setDisabled(True)
+            self.qcb_lineending.setDisabled(True)
+            self.qpb_refresh.setDisabled(True)
+            # self.qpb_load_session.setDisabled(True)
+            if self.aliasActive:
+                self.display(f'Connected successfully to {aliasName} at {self.serialport_name}')
+            else:
+                self.display(f'Connected successfully to {self.serialport_name}')
+            if not bypass:
+                self.serialOpen.emit(True)
+        else:
+            self.display(f'Something went wrong while connecting to {self.serialport_name}. Try again or check connection.')
+
+    def trySN(self,prevSN=''):
+        SN = self.ping()
+        print(SN)
+        if SN==prevSN:
+            self.display(f'No qNimble or timeout on port {self.qcb_ports.currentText()}')
+            return ''
+        else:
+            if len(SN) != 7:
+                self.display(f'Message not fully received. Retrying...')
+                return self.trySN(prevSN=prevSN)
+            else:
+                return SN
+
+
+    """This takes in an alias file allows terminal to access aliases as a dict."""
+    def update_aliases(self):
+        flag,qNAliases = self.loadAliases() # TODO: Add custom alias file name?
+        # if the alias loading was unsuccesful, just load ports. 
+        if not flag:
+            return (False,None)
+              
+        # Alias loading succesful, create ordered list
+        qNList = OrderedDict() # Verified qNs
+        port_index = self.qcb_ports.count() - 1
+        # TODO: This performs a crude check. I couldn't get the slots to play 
+        # right for connect disconnect without a blocking statement, so I use 
+        # waitForReadyRead(). I also do a crude check for new data, which can 
+        # be improved for versatility. It may not really matter. 
+        last_SN = ''
+        for i in range(self.qcb_ports.count()):
+            # Update combo box text
+            self.qcb_ports.setCurrentIndex(i)
+            if (not (self.serialport == None)) and self.serialport.isOpen():
+                self.slot_disconnect(bypass=True)
+            self.slot_connect(bypass=True)
+            if self.serialport.isOpen():
+                SN = self.trySN(last_SN)
+                try:
+                    alias = qNAliases[SN]
+                except:
+                    alias = None
+                if not (alias is None):
+                    # Handle aliases
+                    key = self.serialport.portName() + ":" + SN + ":" + alias
+                    qNList[key] = self.serialport.portName()
+                    self.display(f'Successffully found port with matching alias - creating {key}')
+                    # qNCOMList.append(SN)
+                else:
+                    self.display(f'No qNimble or potential timeout on port {self.qcb_ports.currentText()}')
+                self.slot_disconnect(bypass=True)
+                last_SN = self.read_last()
+
+            else:
+                # terminal display
+                self.display(f'Could not open port {self.qcb_ports.currentText()}')
+
+        return (True,qNList)
+
+    """This is essentially an internal message to the console"""
+    def display(self,msg, err = False):
+        flag = self.fl_autoscroll
+        if err:
+            msg = 'ERR:  ' + msg
+        else:
+            msg = 'INT:  ' + msg
+        
+        if not flag:
+            v_val = self.qtb_receiver.verticalScrollBar().value()
+            h_val = self.qtb_receiver.horizontalScrollBar().value()
+        self.qtb_receiver.moveCursor(QTextCursor.End)
+        self.qtb_receiver.insertPlainText(msg + '\n')
+        if not flag:
+            self.qtb_receiver.verticalScrollBar().setValue(v_val)
+            self.qtb_receiver.horizontalScrollBar().setValue(h_val) 
+        if not self.logfile.closed: # we add this to stop infinite recursion
+            self.slot_log_data(msg)
+        # print(msg) 
+
+    def slot_disconnect(self, bypass=False):
+        self.serialport.close()
+        self.qpb_connect_disconnect.setText("Connect")
+        self.qpb_connect_disconnect.disconnect()
+        self.qpb_connect_disconnect.clicked.connect(self.slot_connect)
+        self.display(f'Disconnected from {self.serialport_name}')
+        # If you really want to re-enable this, change to False
+        self.qcb_ports.setEnabled(True)
+        self.qcb_baudrates.setEnabled(False)
+        self.qcb_databits.setEnabled(False)
+        self.qcb_paritybit.setEnabled(False)
+        self.qcb_stopbits.setEnabled(False)
+        self.qcb_flowcontrol.setEnabled(False)
+        self.qcb_lineending.setEnabled(False)
+        self.qpb_refresh.setEnabled(True)
+        # self.qpb_load_session.setEnabled(True)
+        if not bypass:
+            self.serialOpen.emit(False)
+
+    def ready_read(self):
+        b = bytes(self.serialport.readAll())
+        try:
+            read_all = b.decode("utf-8")
+        except UnicodeDecodeError:
+            read_all = str(b)[2:-1]      
+        # Was this verbose?
+        if True:
+            flag = self.fl_autoscroll
+            if not flag:
+                v_val = self.qtb_receiver.verticalScrollBar().value()
+                h_val = self.qtb_receiver.horizontalScrollBar().value()
+            self.qtb_receiver.moveCursor(QTextCursor.End)
+            self.qtb_receiver.insertPlainText('RCV:  ' + read_all)
+            if not flag:
+                self.qtb_receiver.verticalScrollBar().setValue(v_val)
+                self.qtb_receiver.horizontalScrollBar().setValue(h_val)
+        # log received command: 
+        self.slot_log_data('RCV:  ' + read_all)
+        # We need to access this data somehow...
+        self.last_command = read_all
+
+    def read_last(self):
+        if self.last_command.find('\n') == len(self.last_command) - 1:
+            return self.last_command[:-1]
+        return self.last_command
+
+    def slot_autoscroll(self):
+        self.fl_autoscroll = not self.fl_autoscroll
+
+    def return_pressed(self):
+        self.slot_input()
+    
+    """
+    We want to display a few types of messages:
+    - Any input that was written to the terminal
+    - Any functional call that we use as an alias
+    Thus, an internal flag is needed to differentiate between these two. 
+    """
+    def slot_input(self, cmd=''):
+        if self.serialport:
+            txt = ''
+            if type(cmd) == bool:
+                self.display('Whitespace message - nothing sent!')
+            else: 
+                if len(cmd)>0:
+                    txt = cmd
+                else:
+                    txt = self.qle_sender.text()
+                text_to_send = txt
+                bytes_to_send = bytes(text_to_send + self.lineending, "utf-8")
+                if self.fl_hexinput is True and text_to_send.find('\\x') == 0:
+                    self.serialport.writeData(bytes.fromhex(text_to_send[2:]))
+                else:
+                    self.serialport.writeData(bytes_to_send)
+                # Add to the text box
+                flag = self.fl_autoscroll
+                msg = 'SND:  ' + txt
+                if not flag:
+                    v_val = self.qtb_receiver.verticalScrollBar().value()
+                    h_val = self.qtb_receiver.horizontalScrollBar().value()
+                self.qtb_receiver.moveCursor(QTextCursor.End)
+                self.qtb_receiver.insertPlainText(msg + '\n')
+                if not flag:
+                    self.qtb_receiver.verticalScrollBar().setValue(v_val)
+                    self.qtb_receiver.horizontalScrollBar().setValue(h_val) 
+                self.slot_log_data(msg)
+        self.textFinished.emit(True)
+
+    """
+    Condensed everything to call log_data here in one command instead of spread over everything.
+    """
+    def slot_log_data(self,msg):
+        # Check if logger is open
+        if not self.logfile.closed:
+            # Do a quick check if there is a \n - add if not!
+            if msg.find('\n') == -1:
+                msg = msg + '\n'
+            self.logfile.write(msg)
+        else:
+            print('Logfile deleted or corrupted. Cannot log command.')
+    
+    """Feeds a command to the terminal. These are always internal commands."""
+    def feed(self, cmd, lag=False):
+        self.internal = True
+        self.slot_input(cmd)
+        if lag:
+            self.serialport.waitForReadyRead(500)
+        else:
+            self.serialport.waitForReadyRead(10)
+        return self.read_last()
+    
+    """
+    Loads an alias file. Returns a tuple containing the dict and flag that indicates 
+    if the file was opened properly. 
+    TODO: Allow path to alias filename
+    """
+    def loadAliases(self):
+        # load PID aliases from a local .tsv file called "qNimbleAliases.tsv"
+        filename = "qNimbleAliases.tsv"
+        self.display("Loading qNimble aliases...")
+        aliasesDict = dict()
+        success = False
+        try:
+            with open(filename, 'r') as file:
+                for line in file:
+                    line = line[0:len(line)-1] # strip EOL
+                    try:
+                        key = line.split("\t")[0]
+                        alias = line.split("\t")[1]
+                        if ((len(key)>0) and (len(alias))>0):
+                            aliasesDict[key] = alias
+                    except:
+                        pass
+            success = True
+        except IOError:
+            pass
+            self.display(f"Could not open {filename}")
+        self.display(f"Found aliases in {filename}:")
+        for key in aliasesDict:
+            self.display(key + ":" + aliasesDict[key])
+        self.display(f'Finished reading {filename}')
+        return (success, aliasesDict)
+    
+    """Handles closing / indirect crashing if parent is closed."""
+    def close(self):
+        self.display('Close detected. Closing ports and logfile...')
+        if self.serialport.isOpen():
+            self.slot_disconnect() # disconnect if port is open
+        self.logfile.close()
+    
+    def isConnected(self):
+        return self.serialport.isOpen()
+    
+    """
+    This helps determine if the call was a "functional" call from
+    the GUI. This has the ability to be kinda wonky, but we determine
+    that a call is functional if it contains ()
+    """
+    def isFunction(self,txt):
+        if '(' in txt and ')' in txt:
+            # We believe this is a functional call!
+            index = txt.index('(') # Strip the function and determine if it is a function
+            method = txt[:index].strip()
+
+            if method in self.methods:
+                # This is a method! Make it callable
+                return True
+            else:
+                return False
+
+    ############################ ERROR CHECKING ###############################
+    """
+    -----------------------------------------------------------------------------------------------
+    qNimble commands
+    -----------------------------------------------------------------------------------------------
+    This is a simple command map for common calls and button presses. This should relieve stress on servo_GUI
+    and the user to keep up with proper syntax for qNimble commands. 
+    """
+    # Error checking
+    def chanTypeFailure(self, channel):
+        if type(channel) != int:
+            self.display('Channel type incorrect.', err = True)
+            return True
+        if channel > 4 or channel < 1:
+            self.display('Channel number out of range - must be 1 thru 4.', err = True)
+            return True
+        return False
+    
+    def stateTypeFailure(self, state):
+        if type(state) != bool:
+            if ((type(state) == int) and (state != 0 or state != 1)):
+                if state < 0 or state > 1:
+                    self.display('State type incorrect. Must be 0, 1, or boolean.', err=True)
+                    return True
+        return False
+
+    def valueTypeFailure(self, value):
+        if type(value) != int and type(value) != float:
+            self.display('Value must be a number.', err = True)
+            return True
+        return False
+    
+    ############################ PID PARAMS ###############################
+    # This just so happens to return every parameter known to man...
+    def getAllPIDParams(self):
+        return self.feed('get prop')
+        
+    def getChannelPIDParams(self,channel,var=''):
+        if self.chanTypeFailure(channel):
+            return ''
+        # We are going to parse this to return the desired information
+        raw_data = self.feed(f'get {channel}')
+        channel_data = raw_data.split(':')[1].split(',')
+        for prop in channel_data:
+            key, val = prop.split('=')
+            if var == key.strip():
+                # This is the variable we want
+                value = float(val.strip())
+        return value
+
+    # Proportional gain constant commands
+    def getProp(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        else:
+            return float(self.getChannelPIDParams(channel,var='prop'))
+    
+    def setProp(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        else:
+            return self.feed(f'prop {channel} {value}')
+    
+    # Integration gain constant commands
+    def getInt(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        else:
+            return float(self.getChannelPIDParams(channel,var='int'))
+    
+    def setInt(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        else:
+            return self.feed(f'int {channel} {value}')
+        
+    # Differientation gain constant commands
+    def getDiff(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        else:
+            return float(self.getChannelPIDParams(channel,var='diff'))
+    
+    def setDiff(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        else:
+            return self.feed(f'diff {channel} {value}')
+
+    # Internal setpoint constant commands
+    def getSetpoint(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return float(self.getChannelPIDParams(channel,var='setpt'))
+
+    def setSetpoint(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        if value < 0:
+            self.display('WARNING: Setpoint less than 0!')
+        return self.feed(f'set {channel} {value}')
+
+    ############################ SWEEP PARAMS ###############################
+    # Sweep params
+    def getChannelSweepParams(self,channel,var=''):
+        if self.chanTypeFailure(channel):
+            return ''
+        if var == '':
+            self.feed(f'getSweep {channel}')
+            return self.read_last()
+        else:
+            raw_data = self.feed(f'getSweep {channel}')
+            channel_data = raw_data.split(':')[1].split(',')
+            for prop in channel_data:
+                key, val = prop.split('=')
+                if var == key.strip():
+                    # This is the variable we want
+                    value = float(val.strip())
+            return value
+    
+    def getAllSweepParams(self):
+        for i in range(4):
+            self.feed(f'getSweep {i+1}')
+        return ''
+
+    # Sweep
+    def setSweepType(self,channel,sweep):
+        if self.chanTypeFailure(channel):
+            return ''
+        if type(sweep) == str:
+            types = ['sin', 'saw', 'tri']
+            if sweep not in types:
+                self.display('Not a valid sweep type. Must be \'sin\', \'saw\', or \'tri\'.', err=True)
+                return ''
+            val = types.index(sweep)
+            return self.feed(f'sweepType {channel} {val}')
+        elif type(sweep) == int:
+            if sweep < 0 or sweep > 2:
+                self.display('Not a valid sweep type. Must be 0, 1, or 2',err=True)
+                return ''
+            return self.feed(f'sweepType {channel} {sweep}')
+        else:
+            self.display('Sweeep type must be a string or int.',err=True)
+            return ''
+            
+    def getSweepType(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return int(self.getChannelSweepParams(channel,var='type'))
+    
+    # Amplitude
+    def getAmp(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        else:
+            return float(self.getChannelSweepParams(channel, var = 'amp'))
+        
+    def setAmp(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        else:
+            return self.feed(f'amp {channel} {value}')
+        
+    # Period
+    def getPeriod(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        else:
+            return float(self.getChannelSweepParams(channel, var = 'period'))
+    
+    def setPeriod(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        if value < 0:
+            self.display('Can\'t have negative period', err=True)
+        else:
+            return self.feed(f'pd {channel} {value}')
+        
+    # Phase
+    def getPhase(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        else:
+            return float(self.getChannelSweepParams(channel, var = 'phase'))
+    
+    def setPhase(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        else:
+            return self.feed(f'phi {channel} {value}')
+    
+    # Offset
+    def getOffset(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        else:
+            return float(self.getChannelSweepParams(channel, var = 'offset'))
+    
+    def setOffset(self,channel,value):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(value):
+            return ''
+        if value < 0:
+            self.display('Offset must be equal to or greater than 0.', err = True)
+            return ''
+        else:
+            return self.feed(f'offset {channel} {value}')
+    
+    # All sweep params
+    def getSweepParams(self, channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return float(self.feed(f'get sweep {channel}'))
+
+    # Quick SN getter
+    def ping(self):
+        return self.feed('SN', lag=True)
+    
+    # ADC commands
+    """queryServos should return servo states for all channels."""
+    def queryServos(self):
+        return self.feed('servos')
+    
+    """queryHolds returns bools for all hold states"""
+    def queryHolds(self):
+        return self.feed('holds')
+    
+    def getADCinput(self, channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return self.feed(f'input{channel}')
+    
+    def getADCoutput(self, channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return self.feed(f'output{channel}')
+    
+    def getADCerror(self, channel):
+        if self.chanTypeFailure(channel):
+            return ''   
+        return self.feed(f'error{channel}')
+    
+    def stopHold(self, channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return self.feed(f'stop {channel}')
+    
+    """setADCsampleConfig sets and returns the state of each channel"""
+    def setADCsampleConfig(self, state1, state2, state3, state4):
+        if (self.stateTypeFailure(state1) or 
+            self.stateTypeFailure(state2) or 
+            self.stateTypeFailure(state3) or 
+            self.stateTypeFailure(state4)):
+            self.display('Incorrect types for ADC sample config - must be four booleans.', err=True)
+            return ''
+        return self.feed(f'setconfig {int(state1)} {int(state2)} {int(state3)} {int(state4)}')
+
+    # A few things get returned from this call, we will just use a binary interpretation.
+    def getADCsampleConfig(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        ret = self.feed('config').split('\n')
+        if len(ret) == 1 or len(ret) > 3:
+            # There was a chopped string, restart
+            self.display('Returned string was not received correctly. Retrying...', err=True)
+            return self.getADCsampleConfig(channel)
+        return bool(eval(ret[1].split(',')[channel-1].strip()))
+    
+    def getADCsampleResolution(self):
+        return self.feed('res')
+    
+    # Servo commands
+    def enableServo(self, channel, state):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.stateTypeFailure(state):
+            return ''
+        self.feed(f'enable {channel} {int(state)}')
+        return self.getServoStates()
+    
+    def enableFeed(self, channel, state):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.stateTypeFailure(state):
+            return ''
+        self.feed(f'feed {channel} {int(state)}')
+        return self.getFeedStates()
+    
+    def enableTrack(self, channel, state):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.stateTypeFailure(state):
+            return ''
+        self.feed(f'track {channel} {int(state)}')
+        return self.getTrackStates()
+
+    def enableSweep(self, channel, state):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.stateTypeFailure(state):
+            return ''
+        self.feed(f'sweep {channel} {int(state)}')
+        return self.getSweepStates()
+    
+    def getServoStates(self,lag=False):
+        data = self.feed('is 0',lag=lag).split()[-4:]
+        if len(data) != 4 or len(data[0].strip()) > 1:
+            return self.getServoStates()
+        return data
+    
+    def getServoState(self,channel):
+        if self.chanTypeFailure():
+            return ''
+        state = read_state(self.getServoStates(),channel)
+        self.display(f'Servo on {channel} is {int(state)}')
+        return state
+
+    def getSweepStates(self):
+        return self.feed('is 1')
+
+    def getSweepState(self,channel):
+        if self.chanTypeFailure():
+            return ''
+        state = read_state(self.getSweepStates(),channel)
+        self.display(f'Sweep on {channel} is {int(state)}')
+        return state
+    
+    def getTrackStates(self):
+        return self.feed('is 2')
+    
+    def getTrackState(self,channel):
+        if self.chanTypeFailure():
+            return ''
+        state = read_state(self.getTrackStates(),channel)
+        self.display(f'Tracking on {channel} is {int(state)}')
+        return state
+
+    def getFeedStates(self):
+        return self.feed('is 3')
+    
+    def getFeedState(self,channel):
+        if self.chanTypeFailure():
+            return ''
+        state = read_state(self.getFeedStates(),channel)
+        self.display(f'Feeding on {channel} is {int(state)}')
+        return state
+
+    def resetServo(self, channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return self.feed(f'reset{channel}')
+
+    def adjustHold(self, state):
+        if self.stateTypeFailure(state):
+            return ''
+        # Default state is set in firmware to 1. Really the firmware should be changed
+        # to allow us to alter this, but we can make a workaround to handle. 
+        state = int(state)
+        self.slot_input('flip')
+        self.serialport.waitForReadyRead(100) # This adjustment takes a longer time to read
+        resp = self.read_last()
+        resp = bool(eval(resp[-1]))
+        # self.display(f'Hold logic now flipped to {int(resp)}')
+        if state != resp:
+            self.display(f'Hold logic was flipped to {int(resp)} where {int(state)} was desired. Reflipping...')
+            self.feed('flip')
+        return ''
+
+    # Rails and other servo commands
+    def setRails(self, channel, min, max):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(min) or self.valueTypeFailure(max):
+            return ''
+        if min > max:
+            self.display('Min is greater than max.',err=True)
+            return ''
+        else:
+            if min < 0:
+                self.display('WARNING: Voltage min less than 0 V will produce undesired mixer effects!')
+            if max > 3:
+                self.display('WARNING: Voltage max greater than 3 V may break a mixer!')
+            return self.feed(f'rails {channel} {min} {max}')
+
+    def getRails(self,channel):
+        if self.chanTypeFailure(channel):
+            return ''
+        return self.feed(f'extremes {channel}')
+
+    def setADCRange(self,channel,range):
+        if self.chanTypeFailure(channel):
+            return ''
+        if self.valueTypeFailure(range):
+            return ''
+        if range < 0:
+            self.display('Range must be greater than 0!', err=True)
+            return ''
+        return self.feed(f'range {channel} {range}')
+
+
+class SerialTerminalWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("qNimble Serial Terminal")
+        self.setWindowIcon(QIcon('imgs/qN-logo.ico'))
+        self.serial_terminal = SerialTerminalWidget()
+
+        layout = QHBoxLayout()
+        layout.addWidget(self.serial_terminal)
+        self.setLayout(layout)
+
+"""
+This helps us keep the correct format for our log filenames!
+Format is MM-DD-YYYY_HHMM.log where HHMM is military time
+"""
+from datetime import datetime
+def formate_filename():
+    now = datetime.now()
+
+    date_str = now.strftime("%m-%d-%Y")
+    time_str = now.strftime("%H%M")
+    return f"{date_str}_{time_str}-qN.log"
+
+"""
+This allows you to do functional calls for the qNimble without having
+to memorize the different functional calls for the servo
+"""
+import inspect
+def get_class_methods():
+    all_methods = inspect.getmembers(SerialTerminalWidget, predicate=inspect.isfunction)
+    
+    # Get methods defined specifically in this class, not in parent classes
+    class_methods = []
+    for name, method in all_methods:
+        if method.__qualname__.startswith(SerialTerminalWidget.__name__ + '.'):
+            class_methods.append(name)
+    return class_methods
+
+"""Assumes a text of format ATTR: s1 s2 s3 s4"""
+def read_state(txt,channel):
+    return bool(eval(txt.split(':')[-1].strip().split(' ')[channel-1]))
+
+# Test by uncommenting here to make a mini terminal GUI
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+
+class MyMainWindow(QMainWindow):
+    def __init__(self, parent = None):
+        super().__init__()
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+
+        self.layout = QVBoxLayout()
+        self.central_widget.setLayout(self.layout)
+
+        self.serial_terminal = SerialTerminalWidget()
+        self.layout.addWidget(self.serial_terminal)
+
+    def closeEvent(self,event):
+        for i in range(self.layout.count()):
+            item = self.layout.itemAt(i)
+            widget = item.widget()
+            if widget:
+                try:
+                    widget.close()
+                except:
+                    pass
+
+
+import sys
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MyMainWindow()
+    window.show()
+    sys.exit(app.exec_())
