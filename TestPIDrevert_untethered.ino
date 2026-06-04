@@ -1311,6 +1311,7 @@ void setRailsBipolar(qCommand& qC, Stream& S) {
   
   if (!arg1 || !arg2) {
     S.println("Syntax: brails <chan> <rail>");
+    return;
   }
 
   int chan = atoi(qC.next());
