@@ -746,8 +746,8 @@ void setup(void) {
 
   //square wave functions
   qC.addCommand("toggle", &toggleSquareWave);
-  qC.addCommand("freq",&setFrequencySquare);
-  qC.addCommand("duty",&setDutyCycleSquare);
+  qC.addCommand("setFreq",&setFrequencySquare);
+  qC.addCommand("setDuty",&setDutyCycleSquare);
   qC.addCommand("brails", &setRailsBipolar);
 
   // Reading on ADC channels
@@ -1664,7 +1664,7 @@ void setFrequencySquare(qCommand&qC, Stream& S){
   int base = SQ_BASE_PAGE + idx * SQ_PAGES_PER_CH;
   writeNVMpages(&sq[idx].freq_Hz, sizeof(sq[idx].freq_Hz), base + 2);
 
-  S.printf("CH%d square: freq=%.2f Hz, duty=%.3f\n", channel, freq);
+  S.printf("CH%d square: freq=%.2f Hz", channel, freq);
 }
 
 void setDutyCycleSquare(qCommand&qC, Stream& S){
@@ -1677,6 +1677,7 @@ void setDutyCycleSquare(qCommand&qC, Stream& S){
 
   int channel  = atoi(arg1);
   float duty = atof(arg2);
+
   if (channel < 1 || channel > 4) {
     S.println("Channel must be 1–4");
     return;
@@ -1692,6 +1693,10 @@ void setDutyCycleSquare(qCommand&qC, Stream& S){
   writeNVMpages(&sq[idx].duty, sizeof(sq[idx].duty), base + 3);
 
   S.printf("CH%d square duty set to %.3f\n", channel, duty);
+
+  S.printf("DEBUG duty cmd: chan=%d raw=%.6f stored=%.6f\n",
+         channel, duty, sq[idx].duty);
+         
 }
 
 void setInt(qCommand& qC, Stream& S) {
