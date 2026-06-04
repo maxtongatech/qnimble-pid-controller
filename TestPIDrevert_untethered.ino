@@ -1271,9 +1271,19 @@ void setRails(qCommand& qC, Stream& S) {
   // referenced as "rails"
   // set or reset the rails for the ADC specified (minimum and maximum voltages)
   setDebugWord(0xFFFF0013);
-  int chan = atoi(qC.next());
-  double min = atof(qC.next());
-  double max = atof(qC.next());
+
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+  char* arg3 = qC.next();
+
+  if (!arg1 || !arg2 || !arg3) {
+    S.println("Syntax: rails <chan> <min> <max>");
+    return;
+  }
+
+  int chan = atoi(arg1);
+  double min = atof(arg2);
+  double max = atof(arg3);
 
   switch (chan) {
     case 1:
@@ -1343,6 +1353,7 @@ void setRailsBipolar(qCommand& qC, Stream& S) {
 void getRails(qCommand& qC, Stream& S) {
   // referenced as "extremes"
   setDebugWord(0xFFFF0014);
+
   int chan = atoi(qC.next());
   double mini = 0;
   double maxi = 0;
