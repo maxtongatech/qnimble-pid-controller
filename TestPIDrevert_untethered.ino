@@ -1314,8 +1314,8 @@ void setRailsBipolar(qCommand& qC, Stream& S) {
     return;
   }
 
-  int chan = atoi(qC.next());
-  double rail = atof(qC.next());
+  int chan = atoi(arg1);
+  double rail = atof(arg2);
 
   switch (chan) {
     case 1:
