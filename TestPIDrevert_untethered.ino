@@ -183,6 +183,62 @@ uint64_t isr4_cycles_sum = 0;
 String version = "v1.2";
 
 // ← ADD THESE ↓
+// =========================
+// Output modes
+// =========================
+enum OutMode { 
+  MODE_SERVO = 0,
+  MODE_SWEEP = 1,
+  MODE_SQUARE = 2
+};
+
+OutMode out_mode = MODE_SERVO;   // default: your existing PID/sweep
+
+// =========================
+// Square-wave / PWM config
+// =========================
+
+IntervalTimer SQ_Timer;
+const float sq_update_us = 1.0f; // common step for all channels
+
+struct SquareConfig {
+  bool   enabled;      // is square mode enabled on this channel?
+  OutMode mode;        // current output mode for this channel
+
+  // square wave parameters
+  float  freq_Hz;      // square wave frequency
+  float  duty;         // 0..1
+  float  amp_scale;    // Vpp scaling factor (controlled by Vpp loop)
+
+  // Vpp control
+  float  vpp_set;      // desired Vpp
+  float  vpp_gain;     // gain for amplitude control
+  float  meas_min;
+  float  meas_max;
+  uint32_t meas_count;
+  uint32_t meas_window_samples;
+
+  // timing state
+  uint32_t count;      // step counter within square-wave generator
+  uint32_t steps_per_period;
+
+  //value 
+  float value;
+};
+
+SquareConfig sq[4];    // sq[0] for channel 1, sq[1] for channel 2, etc.
+int sq_mode_int[4];
+
+// =========================
+// NVM layout for square/Vpp
+// =========================
+const int SQ_BASE_PAGE      = 74;    // first free page after your existing 0..73
+const int SQ_PAGES_PER_CH   = 7;     // pages per channel for config
+
+
+// VERSION NUMBER
+String version = "v1.2";
+
 // ISR entry counters for diagnostics
 volatile uint32_t isr1_entry_count = 0;
 volatile uint32_t isr2_entry_count = 0;
@@ -436,6 +492,41 @@ void setup(void) {
 
   setDebugWord(0x11110002);
 
+  // Initialize sq[] baseline before reading NVM
+  // Overwrite with values from NVM (if present)
+  readSquareFromNVM();
+  initSquareDefaultsIfNeeded();
+
+
+  // start shared square wave timer once
+  SQ_Timer.begin(updateSquares, sq_update_us);
+
+    ///////////////
+  // SQUARE WAVE
+  ///////////////
+
+  for (int ch = 0; ch < 4; ch++) {
+    sq[ch].enabled   = false;
+    sq[ch].mode      = MODE_SERVO;
+    sq_mode_int[ch]  = 0;
+    sq[ch].freq_Hz   = 2000.0f;
+    sq[ch].duty      = 0.5f;
+    sq[ch].amp_scale = 1.0f;
+
+    sq[ch].vpp_set   = 5.0f;
+    sq[ch].vpp_gain  = 0.05f;
+    sq[ch].meas_min  =  1e9f;
+    sq[ch].meas_max  = -1e9f;
+    sq[ch].meas_count = 0;
+    sq[ch].meas_window_samples = 500; //1 period, 2 kHz: T = 1/2000 = 500 us
+
+    sq[ch].count = 0;
+    sq[ch].steps_per_period = 0;
+
+    sq[ch].value = 0.0f;
+  }
+
+
   ///////////////
   // READ MEMORY
   ///////////////
@@ -578,6 +669,7 @@ void setup(void) {
 
   readNVMblock(&default_hold, sizeof(default_hold), 73 * 128);
 
+
   ///////////////
   // SET METHODS
   ///////////////
@@ -606,6 +698,44 @@ void setup(void) {
   qC.assignVariable("error3", &err3);
   qC.assignVariable("error4", &err4);
 
+  //Square wave variables
+  for (int ch = 0; ch < 4; ch++) {
+
+    qC.assignVariable("enabled" + ch, &sq[ch].enabled);
+    qC.assignVariable("frequency" + ch, &sq[ch].freq_Hz);
+    qC.assignVariable("duty" + ch, &sq[ch].duty);
+    qC.assignVariable("scaledamplitude" + ch, &sq[ch].amp_scale);
+
+    String name = "mode" + String(ch);  // e.g. "mode0", "mode1"
+    qC.assignVariable(name.c_str(), &sq_mode_int[ch]);
+
+    qC.assignVariable("vppset" + ch, &sq[ch].vpp_set);
+    qC.assignVariable("vppgain" + ch, &sq[ch].vpp_gain);
+    qC.assignVariable("measuredminvoltage" + ch, &sq[ch].meas_min);
+    qC.assignVariable("measuredmaxvoltage" + ch, &sq[ch].meas_max);
+    qC.assignVariable("measuredcount" + ch, &sq[ch].meas_count);
+    qC.assignVariable("measuredsamples" + ch, &sq[ch].meas_window_samples);
+
+    qC.assignVariable("idealcount" + ch, &sq[ch].count);
+    qC.assignVariable("stepsperperiod" + ch, &sq[ch].steps_per_period);
+
+    qC.assignVariable("value" + ch, &sq[ch].value);
+
+    //qC.assignVariable(&sq[ch].duty,      sizeof(sq[ch].duty),      (base + 1) * 128);
+    //qC.assignVariable(&sq[ch].vpp_set,   sizeof(sq[ch].vpp_set),   (base + 2) * 128);
+    //qC.assignVariable(&sq[ch].amp_scale, sizeof(sq[ch].amp_scale), (base + 3) * 128);
+  }
+
+  qC.assignVariable("rail 1 min", &rail1_min);
+  qC.assignVariable("rail 2 min", &rail2_min);
+  qC.assignVariable("rail 3 min", &rail3_min);
+  qC.assignVariable("rail 4 min", &rail4_min);
+  
+  qC.assignVariable("rail 1 max", &rail1_max);
+  qC.assignVariable("rail 2 max", &rail2_max);
+  qC.assignVariable("rail 3 max", &rail3_max);
+  qC.assignVariable("rail 4 max", &rail4_max);
+
   // COMMANDS
   setDebugWord(0x11110016);
   // Interact with serial monitor
@@ -615,10 +745,14 @@ void setup(void) {
   qC.addCommand("SN", &get_SN);
   qC.addCommand("ver", &getVersion);
 
-  // ← ADD THIS LINE HERE ↓
   // qC.addCommand("start_adcs", &start_adcs);
   qC.addCommand("isr_count", &isr_count);  // ← ADD THIS
-  // ← END ↑
+
+  //square wave functions
+  qC.addCommand("toggle", &toggleSquareWave);
+  qC.addCommand("setFreq",&setFrequencySquare);
+  qC.addCommand("setDuty",&setDutyCycleSquare);
+  qC.addCommand("brails", &setRailsBipolar);
 
   // Reading on ADC channels
   qC.addCommand("servos", &read_servos);
@@ -679,7 +813,6 @@ void setup(void) {
   qC.addCommand("reveal", &revealMemory);
   qC.addCommand("nvmdump", dumpNVM);
 
-// ← ADD THESE TWO LINES HERE ↓
   // Timing measurement
   qC.addCommand("timing", &timing_stats);
   qC.addCommand("reset_timing", &reset_timing);
@@ -689,7 +822,17 @@ void setup(void) {
   // ← END OF ADDITION ↑
   // Default (accident)
   qC.addCommand("", accident);
+
 }
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////
+// TIMING //////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////
+
 void test_timing(qCommand& qC, Stream& S) {
   setDebugWord(0xFFFFFFFF);
   
@@ -737,6 +880,8 @@ void test_timing(qCommand& qC, Stream& S) {
   
   S.printf("Budget (t_res): %.2f us\n", t_res);
 }
+
+
 ////////////////////////////////////////////////////////////////////////////////////
 // LED CONFIG               ////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////
@@ -747,6 +892,11 @@ void loop(void) {
   static unsigned long lastrun = 0;
   qC.readSerial(Serial);
 
+  for (int ch = 0; ch < 4; ch++) {
+  syncSqEnumFromModeInt(ch);
+  }
+
+  // We should probably get rid of this atp
   if (millis() > lastrun) {
     lastrun = millis() + 500; //ms
     purple = !purple;
@@ -1125,9 +1275,19 @@ void setRails(qCommand& qC, Stream& S) {
   // referenced as "rails"
   // set or reset the rails for the ADC specified (minimum and maximum voltages)
   setDebugWord(0xFFFF0013);
-  int chan = atoi(qC.next());
-  double min = atof(qC.next());
-  double max = atof(qC.next());
+
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+  char* arg3 = qC.next();
+
+  if (!arg1 || !arg2 || !arg3) {
+    S.println("Syntax: rails <chan> <min> <max>");
+    return;
+  }
+
+  int chan = atoi(arg1);
+  double min = atof(arg2);
+  double max = atof(arg3);
 
   switch (chan) {
     case 1:
@@ -1153,9 +1313,51 @@ void setRails(qCommand& qC, Stream& S) {
   S.printf("Rails on channel %i are now %f and %f\n", chan, min, max);
 }
 
+//Allows us to set the rails to be bipolar (cause I'm too lazy to have 2 inputs if theyre gonna be the exact same but opposite in sign)
+
+void setRailsBipolar(qCommand& qC, Stream& S) {
+  // referenced as "rails"
+  // set or reset the rails for the ADC specified (minimum and maximum voltages)
+  setDebugWord(0xFFFF0013);
+
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+  
+  if (!arg1 || !arg2) {
+    S.println("Syntax: brails <chan> <rail>");
+    return;
+  }
+
+  int chan = atoi(arg1);
+  double rail = atof(arg2);
+
+  switch (chan) {
+    case 1:
+      rail1_min = -rail;
+      rail1_max = rail;
+      break;
+    case 2:
+      rail2_min = -rail;
+      rail2_max = rail;
+      break;
+    case 3:
+      rail3_min = -rail;
+      rail3_max = rail;
+      break;
+    case 4:
+      rail4_min = -rail;
+      rail4_max = rail;
+      break;
+  }
+  writeNVMpages(&rail, sizeof(rail), 60 + chan);
+
+  S.printf("Rails on channel %i are now %f and %f\n", chan, -rail, rail);
+}
+
 void getRails(qCommand& qC, Stream& S) {
   // referenced as "extremes"
   setDebugWord(0xFFFF0014);
+
   int chan = atoi(qC.next());
   double mini = 0;
   double maxi = 0;
@@ -1297,6 +1499,219 @@ void setProp(qCommand& qC, Stream& S) {
   }
   writeNVMpages(&p, sizeof(p), channel - 1);
   S.printf("Proportional gain %i changed to %f\n", channel, p);
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////
+// SQUARE WAVE CONFIG //////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////
+
+void computeSquareStepsForChan(int ch) {
+  if (sq[ch].freq_Hz <= 0.0f) {
+    sq[ch].steps_per_period = 0;
+    return;
+  }
+  float period_us = 1e6f / sq[ch].freq_Hz;
+  sq[ch].steps_per_period = (uint32_t)(period_us / sq_update_us + 0.5f);
+}
+
+void readSquareFromNVM() {
+  for (int ch = 0; ch < 4; ch++) {
+    int base = SQ_BASE_PAGE + ch * SQ_PAGES_PER_CH;
+
+    // Only configuration fields go in NVM
+    readNVMblock(&sq[ch].enabled,   sizeof(sq[ch].enabled),   (base + 0) * 128);
+    readNVMblock(&sq[ch].mode,      sizeof(sq[ch].mode),      (base + 1) * 128);
+    readNVMblock(&sq[ch].freq_Hz,   sizeof(sq[ch].freq_Hz),   (base + 2) * 128);
+    readNVMblock(&sq[ch].duty,      sizeof(sq[ch].duty),      (base + 3) * 128);
+    readNVMblock(&sq[ch].vpp_set,   sizeof(sq[ch].vpp_set),   (base + 4) * 128);
+    readNVMblock(&sq[ch].amp_scale, sizeof(sq[ch].amp_scale), (base + 5) * 128);
+    readNVMblock(&sq[ch].vpp_gain,  sizeof(sq[ch].vpp_gain),  (base + 6) * 128);
+
+    // runtime-only fields are initialized in RAM:
+    sq[ch].meas_min            =  1e9f;
+    sq[ch].meas_max            = -1e9f;
+    sq[ch].meas_count          = 0;
+    sq[ch].meas_window_samples = 500;  // covers many periods at kHz freqs
+    sq[ch].count               = 0;
+    sq[ch].steps_per_period    = 0;
+    sq[ch].value               = 0.0f;
+  }
+}
+
+void initSquareDefaultsIfNeeded() {
+  for (int ch = 0; ch < 4; ch++) {
+    // If NVM was empty/uninitialized, give safe defaults
+    if (!isfinite(sq[ch].freq_Hz) || sq[ch].freq_Hz <= 0.0f) {
+      sq[ch].freq_Hz = 2000.0f;          // 2 kHz
+    }
+    if (!isfinite(sq[ch].duty) || sq[ch].duty < 0.0f || sq[ch].duty > 1.0f) {
+      sq[ch].duty = 0.5f;                // 50%
+    }
+    if (!isfinite(sq[ch].vpp_set) || sq[ch].vpp_set <= 0.0f) {
+      sq[ch].vpp_set = 5.0f;             // 5 Vpp target
+    }
+    if (!isfinite(sq[ch].amp_scale) || sq[ch].amp_scale <= 0.0f) {
+      sq[ch].amp_scale = 1.0f;
+    }
+    if (!isfinite(sq[ch].vpp_gain)) {
+      sq[ch].vpp_gain = 0.05f;
+    }
+
+    // If mode in NVM is garbage, default to SERVO
+    if (sq[ch].mode != MODE_SERVO &&
+        sq[ch].mode != MODE_SWEEP &&
+        sq[ch].mode != MODE_SQUARE) {
+      sq[ch].mode = MODE_SERVO;
+    }
+  }
+}
+
+void syncSqModeIntFromEnum(int ch) {
+  switch (sq[ch].mode) {
+    case MODE_SERVO:  sq_mode_int[ch] = 0; break;
+    case MODE_SWEEP:  sq_mode_int[ch] = 1; break;
+    case MODE_SQUARE: sq_mode_int[ch] = 2; break;
+    default:          sq_mode_int[ch] = 0; sq[ch].mode = MODE_SERVO; break;
+  }
+}
+
+void syncSqEnumFromModeInt(int ch) {
+  switch (sq_mode_int[ch]) {
+    case 0: sq[ch].mode = MODE_SERVO;  break;
+    case 1: sq[ch].mode = MODE_SWEEP;  break;
+    case 2: sq[ch].mode = MODE_SQUARE; break;
+    default: sq_mode_int[ch] = 0; sq[ch].mode = MODE_SERVO; break;
+  }
+}
+
+void updateSquares(){
+  extern double rail1_min, rail1_max;
+  extern double rail2_min, rail2_max;
+  extern double rail3_min, rail3_max;
+  extern double rail4_min, rail4_max;
+
+  for (int ch = 0; ch < 4; ch++) {
+    if (!sq[ch].enabled || sq[ch].mode != MODE_SQUARE)
+      continue;
+
+    if (sq[ch].steps_per_period == 0)
+      continue;
+
+    uint32_t N  = sq[ch].steps_per_period;
+    uint32_t Nh = (uint32_t)(sq[ch].duty * N);
+    uint32_t idx = sq[ch].count % N;
+    sq[ch].count++;
+
+    float rail_min, rail_max;
+    switch (ch) {
+      case 0: rail_min = rail1_min; rail_max = rail1_max; break;
+      case 1: rail_min = rail2_min; rail_max = rail2_max; break;
+      case 2: rail_min = rail3_min; rail_max = rail3_max; break;
+      case 3: rail_min = rail4_min; rail_max = rail4_max; break;
+    }
+
+    float v_high = rail_max * sq[ch].amp_scale;
+    float v_low  = rail_min * sq[ch].amp_scale;
+
+    // store the channel's value to be used later in the getADCx (don't want to have conflicting ISRs)
+    sq[ch].value = (idx < Nh) ? v_high : v_low;
+  }
+}
+
+void toggleSquareWave(qCommand &qC, Stream& S){
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+  if (!arg1 || !arg2){
+    S.println("Syntax: toggle <ADC input> <0|1>");
+    return;
+  }
+
+  int channel = atoi(arg1);
+  int enabled = atoi(arg2);
+
+  if (channel < 1 || channel > 4) {
+    S.println("Channel must be between 1-4");
+    return;
+  }
+  
+  int idx = channel - 1; //indexing
+  sq[idx].enabled = (enabled != 0);
+  sq[idx].mode    = sq[idx].enabled ? MODE_SQUARE : MODE_SERVO;
+
+  syncSqModeIntFromEnum(idx); //keep as a variable for the qC GUI
+
+  // store enabled/mode to NVM
+  int base = SQ_BASE_PAGE + idx * SQ_PAGES_PER_CH;
+  writeNVMpages(&sq[idx].enabled, sizeof(sq[idx].enabled), base + 0);
+  writeNVMpages(&sq[idx].mode,    sizeof(sq[idx].mode),    base + 1);
+
+   S.printf("CH%d square-wave mode: %s\n", channel, sq[idx].enabled ? "ENABLED" : "DISABLED");
+
+}
+
+void setFrequencySquare(qCommand&qC, Stream& S){
+  // parse chan, freq, duty, validate...
+
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+
+  if (!arg1 || !arg2){
+    S.println("Syntax: freq <channel> <frequency>");
+    return;
+  }
+
+  int channel = atoi(arg1);
+  double freq = atof(arg2);
+
+  if (channel < 1 || channel > 4) {
+    S.println("Channel must be 1–4");
+    return;
+  }
+
+  int idx = channel - 1;
+  sq[idx].freq_Hz = freq;
+
+  // Recompute timing for this channel
+  computeSquareStepsForChan(idx);
+
+  // Optionally save freq/duty to NVM
+  int base = SQ_BASE_PAGE + idx * SQ_PAGES_PER_CH;
+  writeNVMpages(&sq[idx].freq_Hz, sizeof(sq[idx].freq_Hz), base + 2);
+
+  S.printf("CH%d square: freq=%.2f Hz", channel, freq);
+}
+
+void setDutyCycleSquare(qCommand&qC, Stream& S){
+  char* arg1 = qC.next();
+  char* arg2 = qC.next();
+  if (!arg1 || !arg2) {
+    S.println("Syntax: duty <chan> <duty_0_1>");
+    return;
+  }
+
+  int channel  = atoi(arg1);
+  float duty = atof(arg2);
+
+  if (channel < 1 || channel > 4) {
+    S.println("Channel must be 1–4");
+    return;
+  }
+  if (duty < 0.0f) duty = 0.0f;
+  if (duty > 1.0f) duty = 1.0f;
+
+  int idx = channel - 1;
+  sq[idx].duty = duty;
+
+  // save to NVM
+  int base = SQ_BASE_PAGE + idx * SQ_PAGES_PER_CH;
+  writeNVMpages(&sq[idx].duty, sizeof(sq[idx].duty), base + 3);
+
+  S.printf("CH%d square duty set to %.3f\n", channel, duty);
+
+  S.printf("DEBUG duty cmd: chan=%d raw=%.6f stored=%.6f\n",
+         channel, duty, sq[idx].duty);
+         
 }
 
 void setInt(qCommand& qC, Stream& S) {
@@ -2026,11 +2441,36 @@ void getADC1(void) {
   
   setDebugWord(0xFFFF2100);
   in1 = readADC1_from_ISR();
-  
-//  if (feed_set1) {
-//    s1 = in3;
-//  } -mg
-  
+
+  //Tryna keep square wave value separate from the PID/sweep output (out1)
+  float dac1_value;
+
+  //  if (feed_set1) {
+  //    s1 = in3;
+  //  } -mg
+
+//If we are in square signal mode: set the input equal to the min/max of the square wave every time
+// add to count
+  if (sq[0].enabled && sq[0].mode == MODE_SQUARE) {
+    if (in1 < sq[0].meas_min) sq[0].meas_min = in1; //set the measured min and max voltage for structure equal to the ADC input reading
+    if (in1 > sq[0].meas_max) sq[0].meas_max = in1;
+    sq[0].meas_count++;
+
+    if (sq[0].meas_count >= sq[0].meas_window_samples) { //once we hit the max number of samples, we determine the peak-to-peak voltage + thus our error
+      float vpp_meas = sq[0].meas_max - sq[0].meas_min;
+      float err      = sq[0].vpp_set - vpp_meas;
+
+      sq[0].amp_scale += sq[0].vpp_gain * err;
+
+      if (sq[0].amp_scale < 0.1f) sq[0].amp_scale = 0.1f; //clamping our amplitude scale so we don't use unreasonably high/low numbers
+      if (sq[0].amp_scale > 1.0f) sq[0].amp_scale = 1.0f;
+
+      sq[0].meas_min   =  1e9f;
+      sq[0].meas_max   = -1e9f;
+      sq[0].meas_count = 0;
+    }
+  }
+
   prev_err1 = err1;
   err1 = in1 - s1;
   
@@ -2169,7 +2609,13 @@ void getADC1(void) {
     railed1 = false;
   }
   
-  writeDAC(1, out1);
+  //Keeping square wave separate from PID/Sweep
+  if (sq[0].enabled && sq[0].mode == MODE_SQUARE) {
+    dac1_value = sq[0].value;          // square-wave path
+  } else {
+    dac1_value = (float)out1;          // existing PID/sweep path
+  }
+  writeDAC(1, dac1_value);
   
   // ============================================================
   // TIMING END - MUST BE LAST
@@ -2199,8 +2645,37 @@ void getADC2(void) {
   setDebugWord(0xFFFF2200);
   in2 = readADC2_from_ISR();
   
+    //Tryna keep square wave value separate from the PID/sweep output (out1)
+  float dac2_value;
+
+  //  if (feed_set1) {
+  //    s1 = in3;
+  //  } -mg
+
+//If we are in square signal mode: set the input equal to the min/max of the square wave every time
+// add to count
+  if (sq[1].enabled && sq[1].mode == MODE_SQUARE) {
+    if (in1 < sq[1].meas_min) sq[1].meas_min = in1; //set the measured min and max voltage for structure equal to the ADC input reading
+    if (in1 > sq[1].meas_max) sq[1].meas_max = in1;
+    sq[1].meas_count++;
+
+    if (sq[1].meas_count >= sq[1].meas_window_samples) { //once we hit the max number of samples, we determine the peak-to-peak voltage + thus our error
+      float vpp_meas = sq[1].meas_max - sq[1].meas_min;
+      float err      = sq[1].vpp_set - vpp_meas;
+
+      sq[1].amp_scale += sq[1].vpp_gain * err;
+
+      if (sq[1].amp_scale < 0.1f) sq[1].amp_scale = 0.1f; //clamping our amplitude scale so we don't use unreasonably high/low numbers
+      if (sq[1].amp_scale > 1.0f) sq[1].amp_scale = 1.0f;
+
+      sq[1].meas_min   =  1e9f;
+      sq[1].meas_max   = -1e9f;
+      sq[1].meas_count = 0;
+    }
+  }
+
   //if (feed_set2) {
-    s2 = in4;
+  s2 = in2;
   //}
   
   prev_err2 = err2;
@@ -2342,7 +2817,13 @@ void getADC2(void) {
     railed2 = false;
   }
   
-  writeDAC(2, out2);
+  //Keeping square wave separate from PID/Sweep
+  if (sq[1].enabled && sq[1].mode == MODE_SQUARE) {
+    dac2_value = sq[1].value;          // square-wave path
+  } else {
+    dac2_value = (float)out1;          // existing PID/sweep path
+  }
+  writeDAC(2, dac2_value);
   
   // ============================================================
   // TIMING END - MUST BE LAST
@@ -2373,11 +2854,35 @@ void getADC3(void) {
   
   setDebugWord(0xFFFF2300);
   in3 = readADC3_from_ISR();
+
+  float dac3_value;
   
 //  if (feed_set3) {
 //    s3 = in1;
 //  } -mg
   
+  //If we are in square signal mode: set the input equal to the min/max of the square wave every time
+  // add to count
+  if (sq[2].enabled && sq[2].mode == MODE_SQUARE) {
+    if (in1 < sq[2].meas_min) sq[2].meas_min = in1; //set the measured min and max voltage for structure equal to the ADC input reading
+    if (in1 > sq[2].meas_max) sq[2].meas_max = in1;
+    sq[1].meas_count++;
+
+    if (sq[2].meas_count >= sq[2].meas_window_samples) { //once we hit the max number of samples, we determine the peak-to-peak voltage + thus our error
+      float vpp_meas = sq[2].meas_max - sq[2].meas_min;
+      float err      = sq[2].vpp_set - vpp_meas;
+
+      sq[2].amp_scale += sq[2].vpp_gain * err;
+
+      if (sq[2].amp_scale < 0.1f) sq[2].amp_scale = 0.1f; //clamping our amplitude scale so we don't use unreasonably high/low numbers
+      if (sq[2].amp_scale > 1.0f) sq[2].amp_scale = 1.0f;
+
+      sq[2].meas_min   =  1e9f;
+      sq[2].meas_max   = -1e9f;
+      sq[2].meas_count = 0;
+    }
+  }
+
   prev_err3 = err3;
   err3 = in3 - s3;
   
@@ -2514,7 +3019,13 @@ void getADC3(void) {
     railed3 = false;
   }
   
-  writeDAC(3, out3);
+  //Keeping square wave separate from PID/Sweep
+  if (sq[2].enabled && sq[2].mode == MODE_SQUARE) {
+    dac3_value = sq[2].value;          // square-wave path
+  } else {
+    dac3_value = (float)out1;          // existing PID/sweep path
+  }
+  writeDAC(3, dac3_value);
   
   // ============================================================
   // TIMING END - MUST BE LAST
@@ -2545,10 +3056,31 @@ void getADC4(void) {
   setDebugWord(0xFFFF2400);
   in4 = readADC4_from_ISR();
   
+  float dac4_value;
+
 //  if (feed_set4) {
 //    s4 = in2;
 //  }
-  
+  if (sq[3].enabled && sq[3].mode == MODE_SQUARE) {
+    if (in1 < sq[3].meas_min) sq[3].meas_min = in1; //set the measured min and max voltage for structure equal to the ADC input reading
+    if (in1 > sq[3].meas_max) sq[3].meas_max = in1;
+    sq[1].meas_count++;
+
+    if (sq[3].meas_count >= sq[3].meas_window_samples) { //once we hit the max number of samples, we determine the peak-to-peak voltage + thus our error
+      float vpp_meas = sq[3].meas_max - sq[3].meas_min;
+      float err      = sq[3].vpp_set - vpp_meas;
+
+      sq[3].amp_scale += sq[3].vpp_gain * err;
+
+      if (sq[3].amp_scale < 0.1f) sq[3].amp_scale = 0.1f; //clamping our amplitude scale so we don't use unreasonably high/low numbers
+      if (sq[3].amp_scale > 1.0f) sq[3].amp_scale = 1.0f;
+
+      sq[3].meas_min   =  1e9f;
+      sq[3].meas_max   = -1e9f;
+      sq[3].meas_count = 0;
+    }
+  }
+
   prev_err4 = err4;
   err4 = in4 - s4;
   
@@ -2686,7 +3218,14 @@ void getADC4(void) {
     railed4 = false;
   }
   
-  writeDAC(4, out4);
+  //Keeping square wave separate from PID/Sweep
+  if (sq[3].enabled && sq[3].mode == MODE_SQUARE) {
+    dac4_value = sq[3].value;          // square-wave path
+  } else {
+    dac4_value = (float)out1;          // existing PID/sweep path
+  }
+  writeDAC(4, dac4_value);
+  
   
   // ============================================================
   // TIMING END - MUST BE LAST
