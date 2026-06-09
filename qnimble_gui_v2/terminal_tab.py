@@ -4,7 +4,7 @@ Direct serial command interface
 """
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                              QTextEdit, QLineEdit, QPushButton, QLabel)
+                            QTextEdit, QLineEdit, QPushButton, QLabel)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QTextCursor
 

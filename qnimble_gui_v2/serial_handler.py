@@ -187,13 +187,13 @@ class SerialHandler(QObject):
         """Set DAC output directly"""
         return self.send_command(f"out{channel} {voltage}")
     
-        def get_p_gain(self, channel):
-            """Get P gain for channel"""
-            response = self.send_command(f"p{channel}")
-            try:
-                return float(response)
-            except:
-                return None
+    def get_p_gain(self, channel):
+        """Get P gain for channel"""
+        response = self.send_command(f"p{channel}")
+        try:
+            return float(response)
+        except:
+            return None
 
     def get_i_gain(self, channel):
         """Get I gain for channel"""
