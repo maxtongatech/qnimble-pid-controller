@@ -42,6 +42,16 @@ struct DAC_Config {
     float offset;
 };
 
+// Square wave configuration for one channel
+struct SquareWave_Config {
+    bool enabled;
+    float period_ms;
+    float duty_cycle;
+    float high_setpoint;
+    float low_setpoint;
+};
+
+
 // System configuration
 struct System_Config {
     uint32_t magic_number;        // Validation marker
@@ -57,6 +67,7 @@ struct Config_Package {
     PID_Gains pid[NUM_ADC_CHANNELS];
     ADC_Config adc[NUM_ADC_CHANNELS];
     DAC_Config dac[NUM_DAC_CHANNELS];
+    SquareWave_Config sqwave[NUM_ADC_CHANNELS];
 };
 
 ////////////////////////////////////////////////////////////////////////////////////
@@ -137,6 +148,23 @@ public:
     // Diagnostics
     void printConfig(Stream& serial);
     void printMemoryInfo(Stream& serial);
+
+        // Square wave configuration (channel 1-4)
+    void setSquareWaveEnabled(uint8_t chan, bool enabled);
+    bool getSquareWaveEnabled(uint8_t chan);
+    
+    void setSquareWavePeriod(uint8_t chan, float period);
+    float getSquareWavePeriod(uint8_t chan);
+    
+    void setSquareWaveDuty(uint8_t chan, float duty);
+    float getSquareWaveDuty(uint8_t chan);
+    
+    void setSquareWaveHigh(uint8_t chan, float high);
+    float getSquareWaveHigh(uint8_t chan);
+    
+    void setSquareWaveLow(uint8_t chan, float low);
+    float getSquareWaveLow(uint8_t chan);
+
 };
 
 #endif // NVM_MANAGER_H

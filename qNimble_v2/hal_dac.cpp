@@ -1,13 +1,9 @@
 ////////////////////////////////////////////////////////////////////////////////////
 // hal_dac.cpp - DAC Hardware Abstraction Layer Implementation
-// qNimble v2.0 - Uses qNimble Quarto board package functions
+// qNimble v2.0
 ////////////////////////////////////////////////////////////////////////////////////
 
 #include "hal_dac.h"
-
-extern "C" {
-    #include "dac.h"
-}
 
 ////////////////////////////////////////////////////////////////////////////////////
 // DAC_CHANNEL IMPLEMENTATION
@@ -17,7 +13,7 @@ DAC_Channel::DAC_Channel() {
     channel_num = 0;
     pin = 0;
     enabled = false;
-    is_hardware_dac = true;
+    is_hardware_dac = false;
     voltage_value = 0.0f;
     dac_value = DAC_MID_VALUE;
     hold_active = false;
@@ -25,13 +21,22 @@ DAC_Channel::DAC_Channel() {
     rail_min = -DAC_VOLTAGE_RANGE;
     rail_max = DAC_VOLTAGE_RANGE;
     write_count = 0;
+    
+    // Calculate voltage scale
     voltage_scale = DAC_MAX_VALUE / (2.0f * DAC_VOLTAGE_RANGE);
 }
 
 void DAC_Channel::init(uint8_t chan, uint8_t dac_pin, bool is_hw_dac) {
     channel_num = chan;
     pin = dac_pin;
-    is_hardware_dac = true;
+    is_hardware_dac = is_hw_dac;
+    
+    if (is_hardware_dac) {
+        // Hardware DAC (channels 1-2)
+        analogWriteResolution(DAC_RESOLUTION);
+        pinMode(pin, OUTPUT);
+    }
+    // SPI DAC initialization handled by DAC_Manager
     
     // Set to mid-scale (0V)
     setVoltage(0.0f);
@@ -42,6 +47,7 @@ void DAC_Channel::setRails(float min_v, float max_v) {
     rail_min = constrain(min_v, -DAC_VOLTAGE_RANGE, DAC_VOLTAGE_RANGE);
     rail_max = constrain(max_v, -DAC_VOLTAGE_RANGE, DAC_VOLTAGE_RANGE);
     
+    // Ensure min < max
     if (rail_min > rail_max) {
         float temp = rail_min;
         rail_min = rail_max;
@@ -55,7 +61,7 @@ void DAC_Channel::enable() {
 
 void DAC_Channel::disable() {
     enabled = false;
-    setVoltage(0.0f);
+    setVoltage(0.0f);  // Return to 0V when disabled
 }
 
 void DAC_Channel::setVoltage(float volts) {
@@ -64,11 +70,17 @@ void DAC_Channel::setVoltage(float volts) {
     // Apply rail limits
     volts = constrain(volts, rail_min, rail_max);
     
-    // Store voltage
+    // Convert voltage to DAC code (bipolar: -10V to +10V)
+    dac_value = (uint16_t)((volts + DAC_VOLTAGE_RANGE) * voltage_scale);
+    dac_value = constrain(dac_value, 0, DAC_MAX_VALUE);
+    
     voltage_value = volts;
     
-    // Write to qNimble hardware using board package function
-    writeDAC(channel_num, volts);
+    // Write to hardware
+    if (is_hardware_dac) {
+        analogWrite(pin, dac_value);
+    }
+    // SPI DAC writes handled by DAC_Manager
     
     write_count++;
 }
@@ -78,20 +90,23 @@ void DAC_Channel::setDACCode(uint16_t code) {
     dac_value = code;
     
     // Convert DAC code to voltage
-    int16_t signed_code = (int16_t)(code - DAC_MID_VALUE);
-    voltage_value = (signed_code * 10.24f) / 32768.0f;
+    voltage_value = (code / voltage_scale) - DAC_VOLTAGE_RANGE;
     
-    // Write using board package function
-    writeDACRAW(channel_num, signed_code);
+    // Write to hardware
+    if (is_hardware_dac) {
+        analogWrite(pin, dac_value);
+    }
     
     write_count++;
 }
 
 void DAC_Channel::setHold(bool hold_state) {
     if (hold_state && !hold_active) {
+        // Entering hold - save current voltage
         hold_voltage = voltage_value;
         hold_active = true;
     } else if (!hold_state && hold_active) {
+        // Exiting hold
         hold_active = false;
     }
 }
@@ -116,24 +131,30 @@ DAC_Manager::DAC_Manager() {
 }
 
 void DAC_Manager::init() {
-    // Initialize all DAC channels
+    // Initialize hardware DACs (channels 1-2)
     channels[0].init(1, DAC_PIN_1, true);
     channels[1].init(2, DAC_PIN_2, true);
-    channels[2].init(3, 0, true);
-    channels[3].init(4, 0, true);
     
-    // Zero all DACs using board package function
-    zeroDACs();
+    // Initialize SPI DACs (channels 3-4)
+    // Note: Pin numbers are placeholders for SPI DACs
+    channels[2].init(3, 0, false);
+    channels[3].init(4, 0, false);
+    
+    initSPI();
     
     active_channel_mask = 0;
 }
 
 void DAC_Manager::initSPI() {
-    // Not needed for qNimble Quarto
+    // TODO: Initialize SPI for external DACs (channels 3-4)
+    // This will depend on your specific hardware configuration
+    // For now, this is a placeholder
 }
 
 void DAC_Manager::writeSPI_DAC(uint8_t dac_num, uint16_t value) {
-    // Not needed for qNimble Quarto
+    // TODO: Implement SPI write for external DACs
+    // This will depend on your specific DAC chip (e.g., AD5754, DAC8554, etc.)
+    // Placeholder for now
 }
 
 DAC_Channel* DAC_Manager::getChannel(uint8_t chan) {
@@ -207,10 +228,14 @@ void DAC_Manager::printChannelInfo(uint8_t chan, Stream& serial) {
     if (!ch) return;
     
     serial.printf("Channel %d: %s\n", chan, ch->isEnabled() ? "ENABLED" : "DISABLED");
-    serial.printf("  Type: FPGA\n");
-    serial.printf("  Voltage: %.4f V\n", ch->getVoltage());
+    serial.printf("  Type: %s\n", ch->isHardwareDAC() ? "Hardware" : "SPI");
+    if (ch->isHardwareDAC()) {
+        serial.printf("  Pin: %d\n", ch->getPin());
+    }
+    serial.printf("  Voltage: %.4f V (code: %d)\n", 
+                  ch->getVoltage(), ch->getDACCode());
     serial.printf("  Rails: %.2f to %.2f V\n", 
-                 ch->getRailMin(), ch->getRailMax());
+                  ch->getRailMin(), ch->getRailMax());
     serial.printf("  Hold: %s", ch->isHeld() ? "ACTIVE" : "INACTIVE");
     if (ch->isHeld()) {
         serial.printf(" (%.4f V)", ch->getVoltage());

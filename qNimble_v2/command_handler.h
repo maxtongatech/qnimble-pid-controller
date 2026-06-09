@@ -11,6 +11,7 @@
 #include "hal_dac.h"
 #include "nvm_manager.h"
 #include "pid_controller.h"
+#include "square_wave.h"
 
 ////////////////////////////////////////////////////////////////////////////////////
 // COMMAND HANDLER CLASS
@@ -22,6 +23,7 @@ private:
     DAC_Manager* dac_mgr;
     NVM_Manager* nvm_mgr;
     Servo_Manager* servo_mgr;
+    SquareWave_Manager* sqwave_mgr;
     
     Stream* serial;
     
@@ -34,6 +36,7 @@ private:
     void handleServoCommand(String cmd);
     void handleADCCommand(String cmd);
     void handleDACCommand(String cmd);
+    void handleSquareWaveCommand(String cmd);
     void handleConfigCommand(String cmd);
     void handleQueryCommand(String cmd);
     void handleSystemCommand(String cmd);
@@ -44,7 +47,7 @@ public:
     
     // Initialization
     void init(ADC_Manager* adc, DAC_Manager* dac, 
-              NVM_Manager* nvm, Servo_Manager* servo, Stream* s);
+              NVM_Manager* nvm, Servo_Manager* servo, Stream* s, SquareWave_Manager *sqwave);
     
     // Main update (call in loop)
     void update();

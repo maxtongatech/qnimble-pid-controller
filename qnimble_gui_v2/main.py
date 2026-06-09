@@ -14,6 +14,7 @@ from hardware_tab import HardwareTab
 from servo_tab import ServoTab
 from config_tab import ConfigTab
 from terminal_tab import TerminalTab
+from square_wave_tab import SquareWaveTab
 
 class qNimbleGUI(QMainWindow):
     def __init__(self):
@@ -44,6 +45,7 @@ class qNimbleGUI(QMainWindow):
         self.hardware_tab = HardwareTab(self.serial)
         self.servo_tab = ServoTab(self.serial)
         self.config_tab = ConfigTab(self.serial)
+        self.square_wave_tab = SquareWaveTab(self.serial)
         self.terminal_tab = TerminalTab(self.serial)
         
         # Add tabs
@@ -51,6 +53,7 @@ class qNimbleGUI(QMainWindow):
         self.tabs.addTab(self.servo_tab, "Servo Control")
         self.tabs.addTab(self.config_tab, "Configuration")
         self.tabs.addTab(self.terminal_tab, "Terminal")
+        self.tabs.addTab(self.square_wave_tab, "Square Wave Generator")
         
         # Menu bar
         self.create_menu_bar()
@@ -155,7 +158,7 @@ class qNimbleGUI(QMainWindow):
                          "qNimble Control v2.0\n\n"
                          "Advanced PID servo control interface\n"
                          "for the qNimble device.\n\n"
-                         "Cereal (yes cereal) controller")
+                         "© 2024 Quantum Opus LLC")
     
     def closeEvent(self, event):
         """Handle window close"""

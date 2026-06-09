@@ -173,6 +173,15 @@ void NVM_Manager::setDefaults() {
         config.dac[i].rail_max = DEFAULT_RAIL_MAX;
         config.dac[i].offset = 0.0f;
     }
+
+    // Square wave defaults for all channels
+    for (int i = 0; i < NUM_ADC_CHANNELS; i++) {
+        config.sqwave[i].enabled = false;
+        config.sqwave[i].period_ms = 0.5f;         // 0.5 ms = 2000 Hz (2 kHz)
+        config.sqwave[i].duty_cycle = 0.5f;        // 50% duty
+        config.sqwave[i].high_setpoint = 0.0f;
+        config.sqwave[i].low_setpoint = 0.0f;
+    }
     
     // Calculate checksum
     config.system.checksum = calculateChecksum(config);
@@ -393,6 +402,64 @@ float NVM_Manager::getDACOffset(uint8_t chan) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////
+// SQUARE WAVE CONFIGURATION
+////////////////////////////////////////////////////////////////////////////////////
+
+void NVM_Manager::setSquareWaveEnabled(uint8_t chan, bool enabled) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return; // do not enable if the channel isn't valid
+    config.sqwave[chan - 1].enabled = enabled;
+}
+
+bool NVM_Manager::getSquareWaveEnabled(uint8_t chan) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return false; //square wave is assumed disabled if the channel isn't valid
+    return config.sqwave[chan - 1].enabled;
+}
+
+void NVM_Manager::setSquareWavePeriod(uint8_t chan, float period) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return;
+    if (period > 0) {
+        config.sqwave[chan - 1].period_ms = period;
+    }
+}
+
+float NVM_Manager::getSquareWavePeriod(uint8_t chan) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return 0.5f; // Assume default frequency is 2 kHz (0.5 ms)
+    return config.sqwave[chan - 1].period_ms;
+}
+
+void NVM_Manager::setSquareWaveDuty(uint8_t chan, float duty) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return; 
+    if (duty >= 0.0f && duty <= 1.0f) {
+        config.sqwave[chan - 1].duty_cycle = duty;
+    }
+}
+
+float NVM_Manager::getSquareWaveDuty(uint8_t chan) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return 0.5f; // Assume default duty cycle is 50%
+    return config.sqwave[chan - 1].duty_cycle;
+}
+
+void NVM_Manager::setSquareWaveHigh(uint8_t chan, float high) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return;
+    config.sqwave[chan - 1].high_setpoint = high;
+}
+
+float NVM_Manager::getSquareWaveHigh(uint8_t chan) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return 0.0f;
+    return config.sqwave[chan - 1].high_setpoint;
+}
+
+void NVM_Manager::setSquareWaveLow(uint8_t chan, float low) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return;
+    config.sqwave[chan - 1].low_setpoint = low;
+}
+
+float NVM_Manager::getSquareWaveLow(uint8_t chan) {
+    if (chan < 1 || chan > NUM_ADC_CHANNELS) return 0.0f;
+    return config.sqwave[chan - 1].low_setpoint;
+}
+
+////////////////////////////////////////////////////////////////////////////////////
 // DIAGNOSTICS
 ////////////////////////////////////////////////////////////////////////////////////
 
@@ -448,6 +515,22 @@ void NVM_Manager::printConfig(Stream& serial) {
                       config.dac[i].offset);
     }
     serial.println();
+
+    // Square wave config
+    serial.println("--- Square Wave Config ---");
+    for (int i = 0; i < NUM_ADC_CHANNELS; i++) {
+        serial.printf("Channel %d: Enabled=%s  Period=%.1fms  Duty=%.2f\n",
+                      i + 1,
+                      config.sqwave[i].enabled ? "YES" : "NO",
+                      config.sqwave[i].period_ms,
+                      config.sqwave[i].duty_cycle);
+        serial.printf("           High=%.4fV  Low=%.4fV  Freq=%.4fHz\n",
+                      config.sqwave[i].high_setpoint,
+                      config.sqwave[i].low_setpoint,
+                      1000.0f / config.sqwave[i].period_ms);
+    }
+    serial.println();
+
 }
 
 void NVM_Manager::printMemoryInfo(Stream& serial) {

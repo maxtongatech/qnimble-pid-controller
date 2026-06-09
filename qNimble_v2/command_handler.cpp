@@ -9,20 +9,22 @@
 // CONSTRUCTOR
 ////////////////////////////////////////////////////////////////////////////////////
 
-Command_Handler::Command_Handler() {
+Command_Handler::Command_Handler() { // preferable to use pointers instead of objects directly because we have delayed initialization
     adc_mgr = nullptr;
     dac_mgr = nullptr;
     nvm_mgr = nullptr;
     servo_mgr = nullptr;
+    sqwave_mgr = nullptr; 
     serial = nullptr;
 }
 
 void Command_Handler::init(ADC_Manager* adc, DAC_Manager* dac, 
-                           NVM_Manager* nvm, Servo_Manager* servo, Stream* s) {
+                           NVM_Manager* nvm, Servo_Manager* servo, Stream* s, SquareWave_Manager* sqwave) {
     adc_mgr = adc;
     dac_mgr = dac;
     nvm_mgr = nvm;
     servo_mgr = servo;
+    sqwave_mgr = sqwave;
     serial = s;
 }
 
@@ -81,6 +83,9 @@ void Command_Handler::parseAndExecute(String cmd) {
     }
     else if (cmd.startsWith("dac") || cmd.startsWith("out")) {
         handleDACCommand(cmd);
+    }
+    else if(cmd.startsWith("sqwave") || cmd.startsWith("square")){
+        handleSquareWaveCommand(cmd);
     }
     else if (cmd.startsWith("save") || cmd.startsWith("load") || 
              cmd.startsWith("reset") || cmd.startsWith("rails")) {
@@ -281,6 +286,229 @@ void Command_Handler::handlePIDCommand(String cmd) {
         } else {
             serial->println("ERROR: Invalid channel");
         }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////
+// SQUARE WAVE COMMANDS
+////////////////////////////////////////////////////////////////////////////////////
+
+void Command_Handler::handleSquareWaveCommand(String cmd){
+    // Format: "sqwave 1 enable" or "sqwave1 enable"
+    // Format: "sqwave 1 disable" or "sqwave1 disable"
+    // Format: "sqwave 1 period 2000" or "sqwave1 period 2000" (2000ms period)
+    // Format: "sqwave 1 duty 0.5" or "sqwave1 duty 0.5" (50% duty cycle)
+    // Format: "sqwave 1 config 2000 0.5" or "sqwave1 config 2000 0.5"
+    // Format: "sqwave 1 high 2.5" or "sqwave1 high 2.5" (high setpoint)
+    // Format: "sqwave 1 low -2.5" or "sqwave1 low -2.5" (low setpoint)
+
+    int channel = 0;
+
+    // remove prefix
+    if (cmd.startsWith("sqwave")) {
+        cmd.remove(0,6);
+    }
+    else if (cmd.startsWith("square")) {
+        cmd.remove(0,6);
+    }
+
+    // check for channel number if attached right next to cmd, no spaces (i.e. sqwave1)
+    if (cmd.length() > 0 && isDigit(cmd.charAt(0))) {
+        channel = cmd.charAt(0);
+        cmd.remove(0, 1);
+    }
+
+    // if no channel yet (i.e. sqwave 1): check next space
+    if (channel == 0) {
+        int spaceIdx = cmd.indexOf(' '); //checks the index of the next space (after index 0)
+        if (spaceIdx > 0){
+            channel = cmd.substring(0, spaceIdx).toInt(); // channel must be in the space between the first index and the next found space's index
+            cmd.remove(0, spaceIdx + 1); // once channel is declared, removes it and the space from the string
+        }
+    }
+
+    cmd.trim();
+
+    // is the channel valid? (1-4) if not --> exit + return nothing
+    if (channel < 1 || channel > NUM_ADC_CHANNELS) {
+        serial->println("ERROR: Invalid channel");
+        return;
+    }
+
+    // if generator is not available --> exit + return nothing
+    SquareWave_Generator* sqwave = sqwave_mgr->getGenerator(channel);
+    if(!sqwave) {
+        serial->println("ERROR: Square wave generator not available currently");
+        return;
+    }
+
+    if (cmd.startsWith("enable") || cmd == "on" || cmd == "1") {                // enable wave
+        sqwave->setEnabled(true);
+        nvm_mgr->setSquareWaveEnabled(channel, true);
+        serial->printf("Square wave %d enabled", channel);
+    }
+    else if (cmd.startsWith("disable") || cmd == "off" || cmd == "0") {         // disable wave
+        sqwave->setEnabled(false);
+        nvm_mgr->setSquareWaveEnabled(channel, false);
+        serial->printf("Square wave %d disabled", channel);
+    }
+    else if (cmd.startsWith("period")) {                                        // change period
+        cmd.remove(0,6);
+        cmd.trim();
+        float period = cmd.toFloat();
+
+        if (period > 0) {
+            sqwave->setPeriod(period);
+            nvm_mgr->setSquareWavePeriod(channel, period);
+            serial->printf("Square wave %d period set to %.1f ms (%.4f Hz)\n", 
+                            channel, period, 1000.0 / period);
+        } else {
+            serial->println("ERROR: Period must be > 0");
+        }
+    }
+    else if (cmd.startsWith("freq")) {                                          // change frequency
+        cmd.remove(0,4); //remove "freq"
+        cmd.trim();
+        float frequency = cmd.toFloat();
+
+        if(frequency > 0) {
+            float period = 1000.0 / frequency; //convert Hz to ms
+            sqwave->setPeriod(period);
+            nvm_mgr->setSquareWavePeriod(channel, period);
+            serial->printf("Square wave %d frequency set to %.4f Hz (%.1f ms period)\n", 
+                            channel, frequency, period);
+        } else {
+            serial->println("ERROR: Frequency must be > 0");
+        }
+    }
+    else if (cmd.startsWith("duty")) {                                          // change duty cycle
+        cmd.remove(0,4); // remove "duty"
+        cmd.trim();
+        float duty = cmd.toFloat();
+
+        if(duty >= 0.0 && duty <= 1.0) {
+            sqwave->setDutyCycle(duty);
+            nvm_mgr->setSquareWaveDuty(channel, duty);
+            serial->printf("Square wave %d set to %.2f\n", channel, duty);
+        } else {
+            serial->printf("ERROR: Duty cycle must be between 0.0 and 1.0");
+        }
+    }
+    else if (cmd.startsWith("config")) {                                         // configure (DEFAULT: frequency (Hz))
+        cmd.remove(0,6);
+        cmd.trim();
+
+        int spaceIdx = cmd.indexOf(' ');
+        if (spaceIdx > 0) {
+            float frequency = cmd.substring(0, spaceIdx).toFloat();
+            float duty = cmd.substring(spaceIdx + 1).toFloat();
+
+            if (frequency > 0 && duty >= 0.0 && duty <= 1.0) {
+               float period = 1000.0 / frequency;  // Convert Hz to ms
+               sqwave->begin(period, duty);
+               nvm_mgr->setSquareWavePeriod(channel, period);
+               nvm_mgr->setSquareWaveDuty(channel, duty);
+               serial->printf("Square wave %d configured: %.4f Hz (%.1f ms), %.2f duty\n", 
+                             channel, frequency, period, duty);
+            } else {
+                serial->println("ERROR: Invalid parameters");
+            }
+        } else {
+            serial->println("ERROR: Format: configf <freq_hz> <duty_cycle>");
+        }
+    }
+    else if (cmd.startsWith("configp")) {                                        // Period-based configuration
+        cmd.remove(0,7);
+        cmd.trim();
+
+        int spaceIdx = cmd.indexOf(' ');
+        if (spaceIdx > 0) {
+            float period = cmd.substring(0, spaceIdx).toFloat();
+            float duty = cmd.substring(spaceIdx + 1).toFloat();
+            
+            if (period > 0 && duty >= 0.0 && duty <= 1.0) {
+                sqwave->begin(period, duty);
+                nvm_mgr->setSquareWavePeriod(channel, period);
+                nvm_mgr->setSquareWaveDuty(channel, duty);
+                serial->printf("Square wave %d configured: %.1f ms (%.4f Hz), %.2f duty\n", 
+                              channel, period, 1000.0 / period, duty);
+            } else {
+                serial->println("ERROR: Invalid parameters");
+            }
+        } else {
+            serial->println("ERROR: Format: config <period_ms> <duty_cycle>");
+        }
+    }
+    else if (cmd.startsWith("high")){                                            // Set high setpoint
+        cmd.remove(0,4);
+        cmd.trim();
+        float high_setpoint = cmd.toFloat(); // in V
+
+        sqwave->setHighSetpoint(high_setpoint);
+        nvm_mgr->setSquareWaveHigh(channel, high_setpoint);
+        serial->printf("Square wave %d set to %.4f V\n", channel, high_setpoint);
+    }
+    else if (cmd.startsWith("low")) {                                           // Set low setpoint
+        cmd.remove(0,3);
+        cmd.trim();
+        float low_setpoint = cmd.toFloat();
+
+        sqwave->setLowSetpoint(low_setpoint);
+        nvm_mgr->setSquareWaveLow(channel, low_setpoint);
+        serial->printf("Square wave %d low setpoint set to %.4f V\n", channel, low_setpoint);
+    } 
+    else if (cmd.startsWith("rails")) {                                         // Set rails (lo + hi @ same time, asymmetrical)
+        cmd.remove(0,5);
+        cmd.trim();
+        
+        int spaceIdx = cmd.indexOf(' ');
+        if(spaceIdx > 0) {
+            float low_v = cmd.substring(0, spaceIdx).toFloat();   // before space
+            float high_v = cmd.substring(spaceIdx + 1).toFloat(); // after space
+
+            sqwave->setRails(low_v, high_v);
+            nvm_mgr->setSquareWaveLow(channel, low_v);
+            nvm_mgr->setSquareWaveHigh(channel, high_v);
+            serial->printf("Square wave %d levels set to [%.4f, %.4f] V\n", 
+                            channel, low_v, high_v);
+        } else {
+            serial->println("ERROR: Format: rails <low_v>, <high_v>");
+        }
+    }
+    else if (cmd.startsWith("brails")) {                                        // Set bipolar rails (lo + hi @ same time, symmetrical)
+        cmd.remove(0,6);
+        cmd.trim();
+        float voltage = cmd.toFloat();
+
+        if (voltage > 0) {
+            sqwave->setBipolarRails(voltage);
+            nvm_mgr->setSquareWaveHigh(channel, voltage);
+            nvm_mgr->setSquareWaveLow(channel, -voltage);
+            serial->printf("Square wave %d rails set to ±%.4f V\n", channel, voltage);
+        } else {
+            serial->println("ERROR: Voltage must be > 0!");
+        }
+    }                                                               
+    else if (cmd.startsWith("reset")) {                                         // Reset square wave
+        sqwave->reset();
+        serial->printf("Square wave %d reset", channel);
+    }
+    else if (cmd.startsWith("status") || cmd.startsWith("get")) {               // Get status of square wave
+        float period, duty, high_sp, low_sp;
+        sqwave->getConfig(period, duty, high_sp, low_sp);
+        
+        serial->printf("Square Wave %d Status:\n", channel);
+        serial->printf("  Enabled: %s\n", sqwave->isEnabled() ? "Yes" : "No");
+        serial->printf("  State: %s\n", sqwave->getState() ? "HIGH" : "LOW");
+        serial->printf("  Period: %.1f ms\n", period);
+        serial->printf("  Frequency: %.4f Hz\n", 1000.0 / period);  // ADD THIS
+        serial->printf("  Duty Cycle: %.2f\n", duty);
+        serial->printf("  High Setpoint: %.4f V\n", high_sp);
+        serial->printf("  Low Setpoint: %.4f V\n", low_sp);
+    }
+    else {
+        serial->println("ERROR: Unknown square wave command");
+        serial->println("Valid: enable, disable, period, freq, duty, config, configf, high, low, reset, status");
     }
 }
 
@@ -624,7 +852,7 @@ void Command_Handler::handleQueryCommand(String cmd) {
     int channel = 0;
     
     // Extract channel number from command
-    for (int i = 0; i < cmd.length(); i++) {
+    for (unsigned int i = 0; i < cmd.length(); i++) {
         if (isDigit(cmd.charAt(i))) {
             channel = cmd.charAt(i) - '0';
             break;
@@ -712,6 +940,20 @@ void Command_Handler::handleSystemCommand(String cmd) {
         serial->println("DAC Commands:");
         serial->println("  dac[1-4] <voltage>    - Set DAC output");
         serial->println("  out[1-4] <voltage>    - Set DAC output");
+        serial->println();
+        serial->println("Square Wave Commands:");
+        serial->println("  sqwave[1-4] enable    - Enable square wave");
+        serial->println("  sqwave[1-4] disable   - Disable square wave");
+        serial->println("  sqwave[1-4] period <ms> - Set period in milliseconds");
+        serial->println("  sqwave[1-4] freq <Hz>   - Set frequency in Hertz");
+        serial->println("  sqwave[1-4] duty <0-1>  - Set duty cycle");
+        serial->println("  sqwave[1-4] config <period> <duty> - Configure (period mode)");
+        serial->println("  sqwave[1-4] configf <freq> <duty>  - Configure (frequency mode)");
+        serial->println("  sqwave[1-4] high <V>  - Set high setpoint");
+        serial->println("  sqwave[1-4] low <V>   - Set low setpoint");
+        serial->println("  rails[1-4] <low V> <high V> - Set rails");
+        serial->println("  brails[1-4] <V>       - Set bipolar rails (±V)");
+        serial->println("  sqwave[1-4] status    - Show configuration");
         serial->println();
         serial->println("Config Commands:");
         serial->println("  save                  - Save config to NVM");
