@@ -41,7 +41,7 @@ class SerialHandler(QObject):
             self.baud_rate = baud_rate
             
             # Give device time to reset
-            time.sleep(2)
+            time.sleep(0.5)
             
             # Clear any startup messages
             self.serial_port.reset_input_buffer()
@@ -68,20 +68,28 @@ class SerialHandler(QObject):
         
         try:
             # Send command
-            self.serial_port.write(f"{command}\n".encode())
+            self.serial_port.write(f"{command}\r\n".encode())
             self.serial_port.flush()
             
             # Wait a bit for response
-            time.sleep(0.05)
+            time.sleep(0.1)
             
-            # Read response
+            # Read response with timeout
             response = ""
-            while self.serial_port.in_waiting > 0:
-                line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
-                if line:
-                    response += line + "\n"
-            
-            return response.strip()
+            start_time = time.time()
+            while (time.time() - start_time) < 0.5:  # 500ms timeout
+                if self.serial_port.in_waiting > 0:
+                    line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        response += line + "\n"
+                else:
+                    # If we have a response and no more data, break
+                    if response:
+                        time.sleep(0.02)  # Small delay to catch any trailing data
+                        if self.serial_port.in_waiting == 0:
+                            break
+
+            return response.strip() if response else None
             
         except Exception as e:
             self.error_occurred.emit(f"Command failed: {str(e)}")
@@ -89,24 +97,24 @@ class SerialHandler(QObject):
     
     def set_p_gain(self, channel, value):
         """Set P gain for channel"""
-        return self.send_command(f"prop{channel} {value}")
+        return self.send_command(f"p{channel} {value}")
     
     def set_i_gain(self, channel, value):
         """Set I gain for channel"""
-        return self.send_command(f"int{channel} {value}")
+        return self.send_command(f"i{channel} {value}")
     
     def set_d_gain(self, channel, value):
         """Set D gain for channel"""
-        return self.send_command(f"deriv{channel} {value}")
+        return self.send_command(f"d{channel} {value}")
     
     def set_setpoint(self, channel, value):
         """Set setpoint for channel"""
-        return self.send_command(f"setpoint{channel} {value}")
+        return self.send_command(f"set{channel} {value}")
     
     def enable_servo(self, channel, enable=True):
         """Enable/disable servo"""
         state = 1 if enable else 0
-        return self.send_command(f"enable{channel} {state}")
+        return self.send_command(f"servo{channel} {state}")
     
     def get_adc_input(self, channel):
         """Get ADC input voltage"""
@@ -173,8 +181,40 @@ class SerialHandler(QObject):
     
     def set_adc_range(self, channel, voltage):
         """Set ADC range"""
-        return self.send_command(f"range{channel} {voltage}")
+        return self.send_command(f"adc_range{channel} {voltage}")
     
     def set_dac_output(self, channel, voltage):
         """Set DAC output directly"""
-        return self.send_command(f"dac{channel} {voltage}")
+        return self.send_command(f"out{channel} {voltage}")
+    
+        def get_p_gain(self, channel):
+            """Get P gain for channel"""
+            response = self.send_command(f"p{channel}")
+            try:
+                return float(response)
+            except:
+                return None
+
+    def get_i_gain(self, channel):
+        """Get I gain for channel"""
+        response = self.send_command(f"i{channel}")
+        try:
+            return float(response)
+        except:
+            return None
+
+    def get_d_gain(self, channel):
+        """Get D gain for channel"""
+        response = self.send_command(f"d{channel}")
+        try:
+            return float(response)
+        except:
+            return None
+
+    def get_setpoint(self, channel):
+        """Get setpoint for channel"""
+        response = self.send_command(f"set{channel}")
+        try:
+            return float(response)
+        except:
+            return None

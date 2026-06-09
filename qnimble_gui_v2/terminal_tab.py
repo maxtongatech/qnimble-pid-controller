@@ -88,6 +88,8 @@ class TerminalTab(QWidget):
         response = self.serial.send_command(command)
         if response:
             self.terminal_display.append(response)
+        else:
+            self.terminal_display.append("(no response)")
         self.terminal_display.append("")  # Blank line
         
         # Scroll to bottom

@@ -158,7 +158,7 @@ class qNimbleGUI(QMainWindow):
                          "qNimble Control v2.0\n\n"
                          "Advanced PID servo control interface\n"
                          "for the qNimble device.\n\n"
-                         "© 2024 Quantum Opus LLC")
+                         "Cereal (yes cereal) controller")
     
     def closeEvent(self, event):
         """Handle window close"""
