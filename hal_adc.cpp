@@ -1,12 +1,46 @@
 ////////////////////////////////////////////////////////////////////////////////////
 // hal_adc.cpp - ADC Hardware Abstraction Layer Implementation
-// qNimble v2.0 - Polled mode (no ISRs)
+// qNimble v2.0 - ISR mode with global storage
 ////////////////////////////////////////////////////////////////////////////////////
 
 #include "hal_adc.h"
 
 extern "C" {
+    #include "adc.h"
     #include "comm.h"
+}
+
+////////////////////////////////////////////////////////////////////////////////////
+// GLOBAL STORAGE FOR ISR DATA
+////////////////////////////////////////////////////////////////////////////////////
+
+static volatile double g_adc_voltages[4] = {0.0, 0.0, 0.0, 0.0};
+static volatile bool g_adc_data_ready[4] = {false, false, false, false};
+
+////////////////////////////////////////////////////////////////////////////////////
+// ISR CALLBACKS - Store data in globals
+////////////////////////////////////////////////////////////////////////////////////
+
+extern "C" {
+    void adc1_dummy_isr(void) {
+        g_adc_voltages[0] = readADC1_from_ISR();
+        g_adc_data_ready[0] = true;
+    }
+    
+    void adc2_dummy_isr(void) {
+        g_adc_voltages[1] = readADC2_from_ISR();
+        g_adc_data_ready[1] = true;
+    }
+    
+    void adc3_dummy_isr(void) {
+        g_adc_voltages[2] = readADC3_from_ISR();
+        g_adc_data_ready[2] = true;
+    }
+    
+    void adc4_dummy_isr(void) {
+        g_adc_voltages[3] = readADC4_from_ISR();
+        g_adc_data_ready[3] = true;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////
@@ -40,6 +74,11 @@ void ADC_Channel::setRange(ADC_Range new_range) {
     range = new_range;
     float range_volts = getADCRangeVolts(range);
     voltage_scale = (2.0f * range_volts) / ADC_MAX_VALUE;
+    
+    // If already enabled, reconfigure FPGA
+    if (enabled) {
+        enable();  // Re-enable with new range
+    }
 }
 
 void ADC_Channel::setSampleInterval(float interval_us) {
@@ -50,15 +89,42 @@ void ADC_Channel::setSampleInterval(float interval_us) {
     } else {
         sample_interval = interval_us;
     }
+    
+    // If already enabled, reconfigure FPGA
+    if (enabled) {
+        enable();  // Re-enable with new interval
+    }
 }
 
 void ADC_Channel::enable() {
     enabled = true;
+    
+    // Configure FPGA to start sampling this ADC
+    uint16_t sample_us = (uint16_t)(sample_interval);
+    adc_scale scale_enum = (adc_scale)range;
+    
+    // Get appropriate ISR callback
+    void (*callback)(void) = nullptr;
+    switch(channel_num) {
+        case 1: callback = adc1_dummy_isr; break;
+        case 2: callback = adc2_dummy_isr; break;
+        case 3: callback = adc3_dummy_isr; break;
+        case 4: callback = adc4_dummy_isr; break;
+    }
+    
+    if (callback) {
+        // This configures the FPGA to sample the ADC and call ISR
+        configureADC(channel_num, sample_us, 0, scale_enum, callback);
+    }
+    
     resetStatistics();
 }
 
 void ADC_Channel::disable() {
     enabled = false;
+    
+    // Disable FPGA ADC sampling
+    disableADC(channel_num);
 }
 
 bool ADC_Channel::readADC() {
@@ -72,36 +138,23 @@ bool ADC_Channel::readADC() {
     
     last_sample_time = current_time;
     
-    // Read directly from data register (polled mode)
-    // The ADC data is at base address + 2
-    uint16_t address = 0x030 + 2 + ((channel_num - 1) * 4);  // ADC1 base = 0x030
-    int16_t raw = (int16_t)readData(address);
+    // Read from ISR-updated global variable
+    int idx = channel_num - 1;
     
-    raw_value = (uint16_t)raw;
-    
-    // Convert to voltage based on range
-    switch(range) {
-        case BIPOLAR_1250mV:
-            voltage_value = (raw * 1.25f) / 32768.0f;
-            break;
-        case BIPOLAR_2500mV:
-            voltage_value = (raw * 2.5f) / 32768.0f;
-            break;
-        case BIPOLAR_5V:
-            voltage_value = (raw * 5.0f) / 32768.0f;
-            break;
-        case BIPOLAR_10V:
-        default:
-            voltage_value = (raw * 10.24f) / 32768.0f;
-            break;
+    if (g_adc_data_ready[idx]) {
+        // Get voltage from ISR
+        voltage_value = g_adc_voltages[idx];
+        g_adc_data_ready[idx] = false;  // Clear flag
+        
+        // Update statistics
+        sample_count++;
+        if (voltage_value < min_voltage) min_voltage = voltage_value;
+        if (voltage_value > max_voltage) max_voltage = voltage_value;
+        
+        return true;
     }
     
-    // Update statistics
-    sample_count++;
-    if (voltage_value < min_voltage) min_voltage = voltage_value;
-    if (voltage_value > max_voltage) max_voltage = voltage_value;
-    
-    return true;
+    return false;
 }
 
 void ADC_Channel::resetStatistics() {
